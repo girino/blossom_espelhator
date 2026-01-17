@@ -1,0 +1,30 @@
+# Blossom Proxy Server Configuration
+
+# Upstream Blossom servers to forward uploads to
+# At least min_upload_servers must be configured
+upstream_servers:
+  - url: "https://blossom1.example.com"
+    priority: 1
+  - url: "https://blossom2.example.com"
+    priority: 2
+  - url: "https://blossom3.example.com"
+    priority: 3
+
+# Proxy server configuration
+server:
+  # Address to listen on (format: host:port or :port)
+  listen_addr: ":8080"
+  
+  # Minimum number of upstream servers that must successfully receive an upload
+  # If fewer servers succeed, the upload will fail
+  min_upload_servers: 2
+  
+  # Strategy for selecting which upstream server to redirect to for downloads
+  # Options: "round_robin", "random", "health_based"
+  redirect_strategy: "round_robin"
+  
+  # Timeout for upstream server requests
+  timeout: 30s
+  
+  # Maximum number of retries for failed requests
+  max_retries: 3

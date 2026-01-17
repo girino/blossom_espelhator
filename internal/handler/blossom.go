@@ -1,0 +1,444 @@
+package handler
+
+import (
+	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"io"
+	"log"
+	"net/http"
+	"strings"
+
+	"github.com/girino/blossom_espelhator/internal/cache"
+	"github.com/girino/blossom_espelhator/internal/upstream"
+)
+
+// BlossomHandler handles Blossom protocol requests
+type BlossomHandler struct {
+	upstreamManager *upstream.Manager
+	cache           *cache.Cache
+	verbose         bool
+}
+
+// New creates a new Blossom handler
+func New(upstreamManager *upstream.Manager, cache *cache.Cache, verbose bool) *BlossomHandler {
+	return &BlossomHandler{
+		upstreamManager: upstreamManager,
+		cache:           cache,
+		verbose:         verbose,
+	}
+}
+
+// HandleUpload handles PUT /upload requests
+func (h *BlossomHandler) HandleUpload(w http.ResponseWriter, r *http.Request) {
+	if h.verbose {
+		log.Printf("[DEBUG] HandleUpload: received %s request from %s", r.Method, r.RemoteAddr)
+		log.Printf("[DEBUG] HandleUpload: path=%s, content-type=%s, content-length=%s", r.URL.Path, r.Header.Get("Content-Type"), r.Header.Get("Content-Length"))
+		log.Printf("[DEBUG] HandleUpload: headers=%v", r.Header)
+	}
+
+	if r.Method != http.MethodPut {
+		if h.verbose {
+			log.Printf("[DEBUG] HandleUpload: method not allowed: %s", r.Method)
+		}
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Read the request body
+	bodyBytes, err := io.ReadAll(r.Body)
+	if err != nil {
+		if h.verbose {
+			log.Printf("[DEBUG] HandleUpload: failed to read body: %v", err)
+		}
+		http.Error(w, fmt.Sprintf("Failed to read request body: %v", err), http.StatusBadRequest)
+		return
+	}
+	defer r.Body.Close()
+
+	if h.verbose {
+		log.Printf("[DEBUG] HandleUpload: read %d bytes from request body", len(bodyBytes))
+	}
+
+	// Calculate SHA256 hash
+	hash := sha256.Sum256(bodyBytes)
+	hashStr := hex.EncodeToString(hash[:])
+
+	if h.verbose {
+		log.Printf("[DEBUG] HandleUpload: calculated hash: %s", hashStr)
+	}
+
+	// Copy headers from original request (for Nostr event, etc.)
+	headers := make(map[string]string)
+	for k, v := range r.Header {
+		// Skip certain headers that shouldn't be forwarded
+		if strings.ToLower(k) == "host" || strings.ToLower(k) == "content-length" {
+			continue
+		}
+		if len(v) > 0 {
+			headers[k] = v[0]
+		}
+	}
+
+	if h.verbose {
+		log.Printf("[DEBUG] HandleUpload: forwarding headers: %v", headers)
+	}
+
+	// Forward upload to upstream servers
+	bodyReader := bytes.NewReader(bodyBytes)
+	successfulServers, err := h.upstreamManager.UploadParallel(r.Context(), bodyReader, r.Header.Get("Content-Type"), headers)
+	if err != nil {
+		if h.verbose {
+			log.Printf("[DEBUG] HandleUpload: upload failed: %v", err)
+		}
+		
+		// Check if error has an HTTP status code to pass through
+		if uploadErr, ok := err.(*upstream.UploadError); ok {
+			if h.verbose {
+				log.Printf("[DEBUG] HandleUpload: passing through upstream status code %d", uploadErr.StatusCode)
+			}
+			w.Header().Set("Content-Type", "text/plain")
+			http.Error(w, uploadErr.Error(), uploadErr.StatusCode)
+			return
+		}
+		
+		// Default to 500 for other errors
+		w.Header().Set("Content-Type", "text/plain")
+		http.Error(w, fmt.Sprintf("Upload failed: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	if h.verbose {
+		log.Printf("[DEBUG] HandleUpload: upload successful to %d servers", len(successfulServers))
+	}
+
+	// Extract server URLs for cache
+	serverURLs := make([]string, 0, len(successfulServers))
+	for _, srv := range successfulServers {
+		serverURLs = append(serverURLs, srv.ServerURL)
+	}
+
+	// Update cache with successful servers
+	h.cache.Add(hashStr, serverURLs)
+
+	if h.verbose {
+		log.Printf("[DEBUG] HandleUpload: added hash %s to cache with %d servers", hashStr, len(serverURLs))
+	}
+
+	// Select a server to return in the response
+	selectedServer, err := h.upstreamManager.SelectServer(successfulServers)
+	if err != nil {
+		if h.verbose {
+			log.Printf("[DEBUG] HandleUpload: failed to select server: %v", err)
+		}
+		http.Error(w, fmt.Sprintf("Failed to select server: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	if h.verbose {
+		log.Printf("[DEBUG] HandleUpload: selected server for response: %s", selectedServer.ServerURL)
+		log.Printf("[DEBUG] HandleUpload: using response body from upstream: %s", string(selectedServer.ResponseBody))
+	}
+
+	// Parse the selected server's response
+	var responseData map[string]interface{}
+	if err := json.Unmarshal(selectedServer.ResponseBody, &responseData); err != nil {
+		if h.verbose {
+			log.Printf("[DEBUG] HandleUpload: failed to parse selected server response: %v", err)
+		}
+		// If parsing fails, return original response
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write(selectedServer.ResponseBody)
+		return
+	}
+
+	// Collect all URLs from all successful servers
+	altURLs := make([]string, 0)
+	for _, srv := range successfulServers {
+		var srvData map[string]interface{}
+		if err := json.Unmarshal(srv.ResponseBody, &srvData); err != nil {
+			if h.verbose {
+				log.Printf("[DEBUG] HandleUpload: failed to parse server response from %s: %v", srv.ServerURL, err)
+			}
+			continue
+		}
+		if urlVal, ok := srvData["url"].(string); ok && urlVal != "" {
+			// Add URL if not already in altURLs
+			found := false
+			for _, altURL := range altURLs {
+				if altURL == urlVal {
+					found = true
+					break
+				}
+			}
+			if !found {
+				altURLs = append(altURLs, urlVal)
+			}
+		}
+	}
+
+	// Always add alturls field (even if empty or single URL)
+	responseData["alturls"] = altURLs
+
+	if h.verbose {
+		log.Printf("[DEBUG] HandleUpload: added alturls with %d URLs: %v", len(altURLs), altURLs)
+	}
+
+	// Marshal and return the modified response
+	responseJSON, err := json.Marshal(responseData)
+	if err != nil {
+		if h.verbose {
+			log.Printf("[DEBUG] HandleUpload: failed to marshal response: %v", err)
+		}
+		// Fallback to original response
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write(selectedServer.ResponseBody)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	w.Write(responseJSON)
+}
+
+// HandleDownload handles GET /<sha256> requests
+func (h *BlossomHandler) HandleDownload(w http.ResponseWriter, r *http.Request) {
+	if h.verbose {
+		log.Printf("[DEBUG] HandleDownload: received %s request from %s", r.Method, r.RemoteAddr)
+		log.Printf("[DEBUG] HandleDownload: path=%s", r.URL.Path)
+	}
+
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Extract hash from path (remove leading slash)
+	hash := strings.TrimPrefix(r.URL.Path, "/")
+	
+	if h.verbose {
+		log.Printf("[DEBUG] HandleDownload: extracted hash: %s", hash)
+	}
+
+	// Validate hash format (should be 64 hex characters for SHA256)
+	if len(hash) != 64 {
+		if h.verbose {
+			log.Printf("[DEBUG] HandleDownload: invalid hash length: %d", len(hash))
+		}
+		http.Error(w, "Invalid hash format", http.StatusBadRequest)
+		return
+	}
+
+	// Check if hash is valid hex
+	if _, err := hex.DecodeString(hash); err != nil {
+		if h.verbose {
+			log.Printf("[DEBUG] HandleDownload: invalid hash format (not hex): %v", err)
+		}
+		http.Error(w, "Invalid hash format", http.StatusBadRequest)
+		return
+	}
+
+	// Look up hash in cache
+	servers, exists := h.cache.Get(hash)
+	if !exists || len(servers) == 0 {
+		if h.verbose {
+			log.Printf("[DEBUG] HandleDownload: hash %s not found in cache", hash)
+		}
+		// Hash not in cache, try to find it on upstream servers
+		// For now, return 404. Could implement fallback query later
+		http.Error(w, "Blob not found", http.StatusNotFound)
+		return
+	}
+
+	if h.verbose {
+		log.Printf("[DEBUG] HandleDownload: hash found in cache with %d servers: %v", len(servers), servers)
+	}
+
+	// Select a server for redirect
+	selectedServer, err := h.upstreamManager.SelectServerURL(servers)
+	if err != nil {
+		if h.verbose {
+			log.Printf("[DEBUG] HandleDownload: failed to select server: %v", err)
+		}
+		http.Error(w, fmt.Sprintf("Failed to select server: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	// Redirect to the selected server
+	redirectURL := fmt.Sprintf("%s/%s", selectedServer, hash)
+	
+	if h.verbose {
+		log.Printf("[DEBUG] HandleDownload: selected server: %s", selectedServer)
+		log.Printf("[DEBUG] HandleDownload: redirecting to: %s", redirectURL)
+	}
+
+	http.Redirect(w, r, redirectURL, http.StatusTemporaryRedirect)
+}
+
+// HandleList handles GET /list/<pubkey> requests
+func (h *BlossomHandler) HandleList(w http.ResponseWriter, r *http.Request) {
+	if h.verbose {
+		log.Printf("[DEBUG] HandleList: received %s request from %s", r.Method, r.RemoteAddr)
+		log.Printf("[DEBUG] HandleList: path=%s", r.URL.Path)
+	}
+
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Extract pubkey from path (format: /list/<pubkey>)
+	path := strings.TrimPrefix(r.URL.Path, "/list/")
+	if path == "" {
+		if h.verbose {
+			log.Printf("[DEBUG] HandleList: pubkey missing from path")
+		}
+		http.Error(w, "Pubkey required", http.StatusBadRequest)
+		return
+	}
+
+	if h.verbose {
+		log.Printf("[DEBUG] HandleList: extracted pubkey: %s", path)
+	}
+
+	// Query all upstream servers in parallel and merge results
+	mergedResults, err := h.upstreamManager.ListParallel(r.Context(), path)
+	if err != nil {
+		if h.verbose {
+			log.Printf("[DEBUG] HandleList: list request failed: %v", err)
+		}
+		http.Error(w, fmt.Sprintf("List request failed: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	if h.verbose {
+		log.Printf("[DEBUG] HandleList: merged %d items from all servers", len(mergedResults))
+	}
+
+	// Marshal the merged results to JSON
+	responseJSON, err := json.Marshal(mergedResults)
+	if err != nil {
+		if h.verbose {
+			log.Printf("[DEBUG] HandleList: failed to marshal merged results: %v", err)
+		}
+		http.Error(w, fmt.Sprintf("Failed to marshal response: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	w.Write(responseJSON)
+}
+
+// HandleDelete handles DELETE /<sha256> requests
+func (h *BlossomHandler) HandleDelete(w http.ResponseWriter, r *http.Request) {
+	if h.verbose {
+		log.Printf("[DEBUG] HandleDelete: received %s request from %s", r.Method, r.RemoteAddr)
+		log.Printf("[DEBUG] HandleDelete: path=%s", r.URL.Path)
+	}
+
+	if r.Method != http.MethodDelete {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Extract hash from path
+	hash := strings.TrimPrefix(r.URL.Path, "/")
+	
+	if h.verbose {
+		log.Printf("[DEBUG] HandleDelete: extracted hash: %s", hash)
+	}
+
+	// Validate hash format
+	if len(hash) != 64 {
+		if h.verbose {
+			log.Printf("[DEBUG] HandleDelete: invalid hash length: %d", len(hash))
+		}
+		http.Error(w, "Invalid hash format", http.StatusBadRequest)
+		return
+	}
+
+	// Check if hash is valid hex
+	if _, err := hex.DecodeString(hash); err != nil {
+		if h.verbose {
+			log.Printf("[DEBUG] HandleDelete: invalid hash format (not hex): %v", err)
+		}
+		http.Error(w, "Invalid hash format", http.StatusBadRequest)
+		return
+	}
+
+	// Get servers that have this blob
+	servers, exists := h.cache.Get(hash)
+	if !exists {
+		if h.verbose {
+			log.Printf("[DEBUG] HandleDelete: hash not in cache, using all upstream servers")
+		}
+		// If not in cache, try all upstream servers
+		servers = h.upstreamManager.GetServerURLs()
+	} else {
+		if h.verbose {
+			log.Printf("[DEBUG] HandleDelete: hash found in cache with %d servers: %v", len(servers), servers)
+		}
+	}
+
+	// Copy headers for authentication
+	headers := make(map[string]string)
+	for k, v := range r.Header {
+		if strings.ToLower(k) == "host" || strings.ToLower(k) == "content-length" {
+			continue
+		}
+		if len(v) > 0 {
+			headers[k] = v[0]
+		}
+	}
+
+	if h.verbose {
+		log.Printf("[DEBUG] HandleDelete: forwarding delete to %d servers", len(servers))
+	}
+
+	// Forward delete to all servers that have the blob
+	successCount := 0
+	for _, serverURL := range servers {
+		cl, err := h.upstreamManager.GetClient(serverURL)
+		if err != nil {
+			if h.verbose {
+				log.Printf("[DEBUG] HandleDelete: failed to get client for %s: %v", serverURL, err)
+			}
+			continue
+		}
+		
+		err = cl.Delete(r.Context(), hash, headers)
+		if err == nil {
+			successCount++
+			if h.verbose {
+				log.Printf("[DEBUG] HandleDelete: successfully deleted from %s", serverURL)
+			}
+		} else {
+			if h.verbose {
+				log.Printf("[DEBUG] HandleDelete: failed to delete from %s: %v", serverURL, err)
+			}
+		}
+	}
+
+	if h.verbose {
+		log.Printf("[DEBUG] HandleDelete: deleted from %d/%d servers", successCount, len(servers))
+	}
+
+	// Remove from cache if at least one delete succeeded
+	if successCount > 0 {
+		h.cache.Remove(hash)
+		if h.verbose {
+			log.Printf("[DEBUG] HandleDelete: removed hash %s from cache", hash)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	} else {
+		if h.verbose {
+			log.Printf("[DEBUG] HandleDelete: delete failed on all servers")
+		}
+		http.Error(w, "Delete failed on all servers", http.StatusInternalServerError)
+	}
+}
