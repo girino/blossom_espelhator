@@ -8,6 +8,7 @@ import (
 	"io"
 	"log"
 	"math/rand"
+	"net/http"
 	"sync"
 	"time"
 
@@ -396,6 +397,130 @@ func (m *Manager) CheckHashOnServers(ctx context.Context, hash string) []string 
 	}
 
 	return serversWithBlob
+}
+
+// UploadPreflightResult represents the result of an upload preflight check
+type UploadPreflightResult struct {
+	ServerURL  string
+	Accepted   bool
+	StatusCode int
+	XReason    string // X-Reason header if rejected
+	Error      error
+}
+
+// UploadPreflightParallel performs HEAD /upload on all upstream servers in parallel to check upload requirements (BUD-06)
+// Returns the list of servers that would accept the upload
+func (m *Manager) UploadPreflightParallel(ctx context.Context, headers map[string]string) ([]UploadPreflightResult, error) {
+	if m.verbose {
+		log.Printf("[DEBUG] UploadPreflightParallel: checking upload requirements on %d servers", len(m.clients))
+		log.Printf("[DEBUG] UploadPreflightParallel: headers=%v", headers)
+	}
+
+	// Create a context with timeout
+	preflightCtx, cancel := context.WithTimeout(ctx, m.timeout)
+	defer cancel()
+
+	// Channel to collect results
+	resultChan := make(chan UploadPreflightResult, len(m.clients))
+
+	// Launch parallel HEAD /upload requests
+	var wg sync.WaitGroup
+	for i, cl := range m.clients {
+		wg.Add(1)
+		go func(idx int, c *client.Client, url string) {
+			defer wg.Done()
+
+			if m.verbose {
+				log.Printf("[DEBUG] UploadPreflightParallel: checking server %d: %s", idx+1, url)
+			}
+
+			resp, err := c.HeadUpload(preflightCtx, headers)
+			if err != nil {
+				if m.verbose {
+					log.Printf("[DEBUG] UploadPreflightParallel: server %d (%s) failed: %v", idx+1, url, err)
+				}
+				resultChan <- UploadPreflightResult{
+					ServerURL:  url,
+					Accepted:   false,
+					StatusCode: 0,
+					Error:      err,
+				}
+				return
+			}
+			defer resp.Body.Close()
+
+			accepted := resp.StatusCode == http.StatusOK
+			xReason := resp.Header.Get("X-Reason")
+
+			if m.verbose {
+				if accepted {
+					log.Printf("[DEBUG] UploadPreflightParallel: server %d (%s) accepted (status=%d)", idx+1, url, resp.StatusCode)
+				} else {
+					log.Printf("[DEBUG] UploadPreflightParallel: server %d (%s) rejected (status=%d, X-Reason=%s)", idx+1, url, resp.StatusCode, xReason)
+				}
+			}
+
+			resultChan <- UploadPreflightResult{
+				ServerURL:  url,
+				Accepted:   accepted,
+				StatusCode: resp.StatusCode,
+				XReason:    xReason,
+				Error:      nil,
+			}
+		}(i, cl, m.serverURLs[i])
+	}
+
+	wg.Wait()
+	close(resultChan)
+
+	// Collect all results
+	results := make([]UploadPreflightResult, 0, len(m.clients))
+	acceptedCount := 0
+	for result := range resultChan {
+		results = append(results, result)
+		if result.Accepted {
+			acceptedCount++
+		}
+	}
+
+	if m.verbose {
+		log.Printf("[DEBUG] UploadPreflightParallel: %d/%d servers accepted the upload", acceptedCount, len(results))
+	}
+
+	// Check if we have enough servers that would accept
+	if acceptedCount < m.minUploadServers {
+		errMsg := fmt.Sprintf("only %d servers would accept the upload, need at least %d", acceptedCount, m.minUploadServers)
+
+		// Find the lowest status code from rejected servers
+		lowestStatusCode := 0
+		allReasons := make([]string, 0)
+		for _, result := range results {
+			if !result.Accepted && result.StatusCode > 0 {
+				if lowestStatusCode == 0 || result.StatusCode < lowestStatusCode {
+					lowestStatusCode = result.StatusCode
+				}
+				if result.XReason != "" {
+					allReasons = append(allReasons, result.XReason)
+				}
+			}
+		}
+
+		// If no status codes from rejected servers, use 400 (Bad Request)
+		if lowestStatusCode == 0 {
+			lowestStatusCode = http.StatusBadRequest
+		}
+
+		if m.verbose {
+			log.Printf("[DEBUG] UploadPreflightParallel: upload would fail - using status code %d", lowestStatusCode)
+		}
+
+		return results, &UploadError{
+			StatusCode: lowestStatusCode,
+			Message:    errMsg,
+		}
+	}
+
+	return results, nil
 }
 
 // ListParallel queries all upstream servers in parallel for a list of blobs

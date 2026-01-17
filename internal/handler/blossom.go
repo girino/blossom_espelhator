@@ -31,12 +31,19 @@ func New(upstreamManager *upstream.Manager, cache *cache.Cache, verbose bool) *B
 	}
 }
 
-// HandleUpload handles PUT /upload requests
+// HandleUpload handles PUT /upload and HEAD /upload requests
+// HEAD /upload implements BUD-06: Upload requirements (preflight check)
 func (h *BlossomHandler) HandleUpload(w http.ResponseWriter, r *http.Request) {
 	if h.verbose {
 		log.Printf("[DEBUG] HandleUpload: received %s request from %s", r.Method, r.RemoteAddr)
 		log.Printf("[DEBUG] HandleUpload: path=%s, content-type=%s, content-length=%s", r.URL.Path, r.Header.Get("Content-Type"), r.Header.Get("Content-Length"))
 		log.Printf("[DEBUG] HandleUpload: headers=%v", r.Header)
+	}
+
+	// Handle HEAD /upload (BUD-06: Upload requirements preflight check)
+	if r.Method == http.MethodHead {
+		h.handleUploadPreflight(w, r)
+		return
 	}
 
 	if r.Method != http.MethodPut {
@@ -203,6 +210,84 @@ func (h *BlossomHandler) HandleUpload(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	w.Write(responseJSON)
+}
+
+// handleUploadPreflight handles HEAD /upload requests (BUD-06: Upload requirements preflight check)
+// The request should include headers: X-SHA-256, X-Content-Length, X-Content-Type
+// Returns 200 OK if acceptable, or 4xx with X-Reason header if not
+func (h *BlossomHandler) handleUploadPreflight(w http.ResponseWriter, r *http.Request) {
+	if h.verbose {
+		log.Printf("[DEBUG] handleUploadPreflight: received HEAD /upload request from %s", r.RemoteAddr)
+		log.Printf("[DEBUG] handleUploadPreflight: headers=%v", r.Header)
+	}
+
+	// Extract preflight headers (X-SHA-256, X-Content-Length, X-Content-Type)
+	preflightHeaders := make(map[string]string)
+	for k, v := range r.Header {
+		// Skip certain headers that shouldn't be forwarded
+		if strings.ToLower(k) == "host" {
+			continue
+		}
+		if len(v) > 0 {
+			preflightHeaders[k] = v[0]
+		}
+	}
+
+	if h.verbose {
+		log.Printf("[DEBUG] handleUploadPreflight: forwarding preflight headers: %v", preflightHeaders)
+	}
+
+	// Check upload requirements on all upstream servers
+	results, err := h.upstreamManager.UploadPreflightParallel(r.Context(), preflightHeaders)
+	if err != nil {
+		if h.verbose {
+			log.Printf("[DEBUG] handleUploadPreflight: preflight check failed: %v", err)
+		}
+
+		// Check if error has an HTTP status code to pass through
+		if uploadErr, ok := err.(*upstream.UploadError); ok {
+			if h.verbose {
+				log.Printf("[DEBUG] handleUploadPreflight: passing through upstream status code %d", uploadErr.StatusCode)
+			}
+
+			// Collect X-Reason headers from rejected servers
+			reasons := make([]string, 0)
+			for _, result := range results {
+				if !result.Accepted && result.XReason != "" {
+					reasons = append(reasons, result.XReason)
+				}
+			}
+
+			// If we have reasons, use the first one; otherwise use error message
+			reason := uploadErr.Error()
+			if len(reasons) > 0 {
+				reason = reasons[0]
+			}
+
+			w.Header().Set("X-Reason", reason)
+			w.WriteHeader(uploadErr.StatusCode)
+			return
+		}
+
+		// Default to 500 for other errors
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	// Count accepted servers
+	acceptedCount := 0
+	for _, result := range results {
+		if result.Accepted {
+			acceptedCount++
+		}
+	}
+
+	if h.verbose {
+		log.Printf("[DEBUG] handleUploadPreflight: preflight check passed - %d/%d servers would accept", acceptedCount, len(results))
+	}
+
+	// Return 200 OK if at least minUploadServers would accept
+	w.WriteHeader(http.StatusOK)
 }
 
 // HandleDownload handles GET /<sha256> requests

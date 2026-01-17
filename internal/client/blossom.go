@@ -277,6 +277,48 @@ func (c *Client) Head(ctx context.Context, hash string) (*http.Response, error) 
 	return resp, nil
 }
 
+// HeadUpload performs a HEAD request to /upload to check upload requirements (BUD-06)
+// The request should include headers: X-SHA-256, X-Content-Length, X-Content-Type
+// Returns the HTTP response with headers including X-Reason if rejected
+func (c *Client) HeadUpload(ctx context.Context, headers map[string]string) (*http.Response, error) {
+	url := fmt.Sprintf("%s/upload", c.baseURL)
+
+	if c.verbose {
+		log.Printf("[DEBUG] Client.HeadUpload: checking %s with headers: %v", c.baseURL, headers)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "HEAD", url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	// Copy headers (X-SHA-256, X-Content-Length, X-Content-Type, etc.)
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
+
+	if c.verbose {
+		log.Printf("[DEBUG] Client.HeadUpload: sending HEAD request to %s", url)
+	}
+
+	startTime := time.Now()
+	resp, err := c.httpClient.Do(req)
+	duration := time.Since(startTime)
+
+	if err != nil {
+		if c.verbose {
+			log.Printf("[DEBUG] Client.HeadUpload: request failed after %v: %v", duration, err)
+		}
+		return nil, fmt.Errorf("head upload request failed: %w", err)
+	}
+
+	if c.verbose {
+		log.Printf("[DEBUG] Client.HeadUpload: response received after %v - status=%d, headers=%v", duration, resp.StatusCode, resp.Header)
+	}
+
+	return resp, nil
+}
+
 // UploadWithBody uploads using a byte slice body
 func (c *Client) UploadWithBody(ctx context.Context, body []byte, contentType string, headers map[string]string) ([]byte, error) {
 	return c.Upload(ctx, bytes.NewReader(body), contentType, headers)
