@@ -249,6 +249,34 @@ func (c *Client) GetBaseURL() string {
 	return c.baseURL
 }
 
+// Head performs a HEAD request to check if a blob exists and returns the response
+func (c *Client) Head(ctx context.Context, hash string) (*http.Response, error) {
+	url := fmt.Sprintf("%s/%s", c.baseURL, hash)
+
+	if c.verbose {
+		log.Printf("[DEBUG] Client.Head: checking %s for hash %s", c.baseURL, hash)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "HEAD", url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		if c.verbose {
+			log.Printf("[DEBUG] Client.Head: request failed: %v", err)
+		}
+		return nil, fmt.Errorf("head request failed: %w", err)
+	}
+
+	if c.verbose {
+		log.Printf("[DEBUG] Client.Head: response status=%d, headers=%v", resp.StatusCode, resp.Header)
+	}
+
+	return resp, nil
+}
+
 // UploadWithBody uploads using a byte slice body
 func (c *Client) UploadWithBody(ctx context.Context, body []byte, contentType string, headers map[string]string) ([]byte, error) {
 	return c.Upload(ctx, bytes.NewReader(body), contentType, headers)

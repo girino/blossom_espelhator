@@ -93,7 +93,7 @@ func (h *BlossomHandler) HandleUpload(w http.ResponseWriter, r *http.Request) {
 		if h.verbose {
 			log.Printf("[DEBUG] HandleUpload: upload failed: %v", err)
 		}
-		
+
 		// Check if error has an HTTP status code to pass through
 		if uploadErr, ok := err.(*upstream.UploadError); ok {
 			if h.verbose {
@@ -103,7 +103,7 @@ func (h *BlossomHandler) HandleUpload(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, uploadErr.Error(), uploadErr.StatusCode)
 			return
 		}
-		
+
 		// Default to 500 for other errors
 		w.Header().Set("Content-Type", "text/plain")
 		http.Error(w, fmt.Sprintf("Upload failed: %v", err), http.StatusInternalServerError)
@@ -219,7 +219,7 @@ func (h *BlossomHandler) HandleDownload(w http.ResponseWriter, r *http.Request) 
 
 	// Extract hash from path (remove leading slash)
 	hash := strings.TrimPrefix(r.URL.Path, "/")
-	
+
 	if h.verbose {
 		log.Printf("[DEBUG] HandleDownload: extracted hash: %s", hash)
 	}
@@ -280,7 +280,7 @@ func (h *BlossomHandler) HandleDownload(w http.ResponseWriter, r *http.Request) 
 
 	// Redirect to the selected server
 	redirectURL := fmt.Sprintf("%s/%s", selectedServer, hash)
-	
+
 	if h.verbose {
 		log.Printf("[DEBUG] HandleDownload: selected server: %s", selectedServer)
 		log.Printf("[DEBUG] HandleDownload: redirecting to: %s", redirectURL)
@@ -366,7 +366,7 @@ func (h *BlossomHandler) HandleHead(w http.ResponseWriter, r *http.Request) {
 		log.Printf("[DEBUG] HandleHead: selected server: %s", selectedServer)
 	}
 
-	// Make HEAD request to the selected upstream server and proxy the headers
+	// Make HEAD request to the first upstream server that has the blob
 	cl, err := h.upstreamManager.GetClient(selectedServer)
 	if err != nil {
 		if h.verbose {
@@ -376,23 +376,11 @@ func (h *BlossomHandler) HandleHead(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Use the client's Download method which does a HEAD request
-	// We'll make a direct HEAD request to proxy headers
-	url := fmt.Sprintf("%s/%s", selectedServer, hash)
-	req, err := http.NewRequestWithContext(r.Context(), "HEAD", url, nil)
+	// Perform HEAD request using client
+	resp, err := cl.Head(r.Context(), hash)
 	if err != nil {
 		if h.verbose {
-			log.Printf("[DEBUG] HandleHead: failed to create request: %v", err)
-		}
-		http.Error(w, fmt.Sprintf("Failed to create request: %v", err), http.StatusInternalServerError)
-		return
-	}
-
-	// Make the request
-	resp, err := cl.(*client.Client).GetHTTPClient().Do(req)
-	if err != nil {
-		if h.verbose {
-			log.Printf("[DEBUG] HandleHead: request failed: %v", err)
+			log.Printf("[DEBUG] HandleHead: HEAD request failed: %v", err)
 		}
 		http.Error(w, fmt.Sprintf("Request failed: %v", err), http.StatusInternalServerError)
 		return
@@ -483,7 +471,7 @@ func (h *BlossomHandler) HandleDelete(w http.ResponseWriter, r *http.Request) {
 
 	// Extract hash from path
 	hash := strings.TrimPrefix(r.URL.Path, "/")
-	
+
 	if h.verbose {
 		log.Printf("[DEBUG] HandleDelete: extracted hash: %s", hash)
 	}
@@ -545,7 +533,7 @@ func (h *BlossomHandler) HandleDelete(w http.ResponseWriter, r *http.Request) {
 			}
 			continue
 		}
-		
+
 		err = cl.Delete(r.Context(), hash, headers)
 		if err == nil {
 			successCount++
