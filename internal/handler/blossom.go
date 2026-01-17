@@ -212,6 +212,102 @@ func (h *BlossomHandler) HandleUpload(w http.ResponseWriter, r *http.Request) {
 	w.Write(responseJSON)
 }
 
+// HandleMirror handles PUT /mirror requests (BUD-04: Mirroring blobs)
+func (h *BlossomHandler) HandleMirror(w http.ResponseWriter, r *http.Request) {
+	if h.verbose {
+		log.Printf("[DEBUG] HandleMirror: received %s request from %s", r.Method, r.RemoteAddr)
+		log.Printf("[DEBUG] HandleMirror: path=%s, content-type=%s, content-length=%s", r.URL.Path, r.Header.Get("Content-Type"), r.Header.Get("Content-Length"))
+		log.Printf("[DEBUG] HandleMirror: headers=%v", r.Header)
+	}
+
+	if r.Method != http.MethodPut {
+		if h.verbose {
+			log.Printf("[DEBUG] HandleMirror: method not allowed: %s", r.Method)
+		}
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Read the request body
+	bodyBytes, err := io.ReadAll(r.Body)
+	if err != nil {
+		if h.verbose {
+			log.Printf("[DEBUG] HandleMirror: failed to read body: %v", err)
+		}
+		http.Error(w, fmt.Sprintf("Failed to read request body: %v", err), http.StatusBadRequest)
+		return
+	}
+	defer r.Body.Close()
+
+	if h.verbose {
+		log.Printf("[DEBUG] HandleMirror: read %d bytes from request body", len(bodyBytes))
+	}
+
+	// Copy headers from original request (for Nostr event, etc.)
+	headers := make(map[string]string)
+	for k, v := range r.Header {
+		// Skip certain headers that shouldn't be forwarded
+		if strings.ToLower(k) == "host" || strings.ToLower(k) == "content-length" {
+			continue
+		}
+		if len(v) > 0 {
+			headers[k] = v[0]
+		}
+	}
+
+	if h.verbose {
+		log.Printf("[DEBUG] HandleMirror: forwarding headers: %v", headers)
+	}
+
+	// Forward mirror request to upstream servers
+	bodyReader := bytes.NewReader(bodyBytes)
+	successfulServers, err := h.upstreamManager.MirrorParallel(r.Context(), bodyReader, r.Header.Get("Content-Type"), headers)
+	if err != nil {
+		if h.verbose {
+			log.Printf("[DEBUG] HandleMirror: mirror request failed: %v", err)
+		}
+
+		// Check if error has an HTTP status code to pass through
+		if uploadErr, ok := err.(*upstream.UploadError); ok {
+			if h.verbose {
+				log.Printf("[DEBUG] HandleMirror: passing through upstream status code %d", uploadErr.StatusCode)
+			}
+			w.Header().Set("Content-Type", "text/plain")
+			http.Error(w, uploadErr.Error(), uploadErr.StatusCode)
+			return
+		}
+
+		// Default to 500 for other errors
+		w.Header().Set("Content-Type", "text/plain")
+		http.Error(w, fmt.Sprintf("Mirror request failed: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	if h.verbose {
+		log.Printf("[DEBUG] HandleMirror: mirror request successful to %d servers", len(successfulServers))
+	}
+
+	// Select a server to return in the response
+	selectedServer, err := h.upstreamManager.SelectServer(successfulServers)
+	if err != nil {
+		if h.verbose {
+			log.Printf("[DEBUG] HandleMirror: failed to select server: %v", err)
+		}
+		http.Error(w, fmt.Sprintf("Failed to select server: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	if h.verbose {
+		log.Printf("[DEBUG] HandleMirror: selected server for response: %s", selectedServer.ServerURL)
+		log.Printf("[DEBUG] HandleMirror: using response body from upstream: %s", string(selectedServer.ResponseBody))
+	}
+
+	// Return the selected server's response
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	w.Write(selectedServer.ResponseBody)
+}
+
 // handleUploadPreflight handles HEAD /upload requests (BUD-06: Upload requirements preflight check)
 // The request should include headers: X-SHA-256, X-Content-Length, X-Content-Type
 // Returns 200 OK if acceptable, or 4xx with X-Reason header if not

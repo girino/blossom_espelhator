@@ -45,6 +45,9 @@ func main() {
 	// Upload endpoint
 	mux.HandleFunc("/upload", blossomHandler.HandleUpload)
 
+	// Mirror endpoint
+	mux.HandleFunc("/mirror", blossomHandler.HandleMirror)
+
 	// List endpoint
 	mux.HandleFunc("/list/", blossomHandler.HandleList)
 

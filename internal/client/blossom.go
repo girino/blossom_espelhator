@@ -319,6 +319,80 @@ func (c *Client) HeadUpload(ctx context.Context, headers map[string]string) (*ht
 	return resp, nil
 }
 
+// Mirror sends a PUT /mirror request to request mirroring of a blob (BUD-04)
+// The request body should contain blob metadata/hash
+// Headers should include authentication (Nostr event)
+// Returns the response body on success
+func (c *Client) Mirror(ctx context.Context, body io.Reader, contentType string, headers map[string]string) ([]byte, error) {
+	url := fmt.Sprintf("%s/mirror", c.baseURL)
+
+	if c.verbose {
+		log.Printf("[DEBUG] Client.Mirror: %s - method=PUT, content-type=%s", c.baseURL, contentType)
+		log.Printf("[DEBUG] Client.Mirror: headers=%v", headers)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "PUT", url, body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	if contentType != "" {
+		req.Header.Set("Content-Type", contentType)
+	}
+
+	// Copy additional headers (e.g., Nostr event headers)
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
+
+	if c.verbose {
+		log.Printf("[DEBUG] Client.Mirror: sending request to %s", url)
+	}
+
+	startTime := time.Now()
+	resp, err := c.httpClient.Do(req)
+	duration := time.Since(startTime)
+
+	if err != nil {
+		if c.verbose {
+			log.Printf("[DEBUG] Client.Mirror: request failed after %v: %v", duration, err)
+		}
+		return nil, fmt.Errorf("mirror request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if c.verbose {
+		log.Printf("[DEBUG] Client.Mirror: response received after %v - status=%d, headers=%v", duration, resp.StatusCode, resp.Header)
+	}
+
+	// Read response body
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		if c.verbose {
+			log.Printf("[DEBUG] Client.Mirror: failed to read response body: %v", err)
+		}
+		bodyBytes = nil
+	}
+
+	// Accept 200, 201, and 202 as success status codes
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusAccepted {
+		bodyStr := string(bodyBytes)
+		if bodyStr == "" {
+			bodyStr = "(empty response body)"
+		}
+		if c.verbose {
+			log.Printf("[DEBUG] Client.Mirror: mirror request failed - status=%d, body=%s", resp.StatusCode, bodyStr)
+		}
+		return nil, NewHTTPError(resp.StatusCode, bodyStr)
+	}
+
+	if c.verbose {
+		log.Printf("[DEBUG] Client.Mirror: mirror request successful, response body: %s", string(bodyBytes))
+	}
+
+	return bodyBytes, nil
+}
+
 // UploadWithBody uploads using a byte slice body
 func (c *Client) UploadWithBody(ctx context.Context, body []byte, contentType string, headers map[string]string) ([]byte, error) {
 	return c.Upload(ctx, bytes.NewReader(body), contentType, headers)

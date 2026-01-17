@@ -228,6 +228,138 @@ func (m *Manager) UploadParallel(ctx context.Context, body io.Reader, contentTyp
 	return successfulServers, nil
 }
 
+// MirrorParallel sends mirror requests to multiple upstream servers in parallel (BUD-04)
+// Returns the list of successful servers with their response bodies and an error if fewer than minUploadServers succeeded
+func (m *Manager) MirrorParallel(ctx context.Context, body io.Reader, contentType string, headers map[string]string) ([]UploadResultWithResponse, error) {
+	if m.verbose {
+		log.Printf("[DEBUG] MirrorParallel: starting parallel mirror requests to %d servers", len(m.clients))
+		log.Printf("[DEBUG] MirrorParallel: content-type=%s, headers=%v", contentType, headers)
+	}
+
+	// Create a context with timeout
+	mirrorCtx, cancel := context.WithTimeout(ctx, m.timeout)
+	defer cancel()
+
+	// Channel to collect results
+	resultChan := make(chan UploadResult, len(m.clients))
+
+	// Read body into memory so we can reuse it for multiple mirror requests
+	bodyBytes, err := io.ReadAll(body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read request body: %w", err)
+	}
+
+	if m.verbose {
+		log.Printf("[DEBUG] MirrorParallel: read %d bytes from request body", len(bodyBytes))
+	}
+
+	// Launch parallel mirror requests
+	var wg sync.WaitGroup
+	for i, cl := range m.clients {
+		wg.Add(1)
+		go func(idx int, c *client.Client, url string) {
+			defer wg.Done()
+
+			if m.verbose {
+				log.Printf("[DEBUG] MirrorParallel: starting mirror request to server %d: %s", idx+1, url)
+			}
+
+			// Create a new reader for each mirror request
+			reader := bytes.NewReader(bodyBytes)
+
+			mirrorStart := time.Now()
+			responseBody, err := c.Mirror(mirrorCtx, reader, contentType, headers)
+			mirrorDuration := time.Since(mirrorStart)
+
+			statusCode := 0
+			if err != nil {
+				if httpErr, ok := err.(*client.HTTPError); ok {
+					statusCode = httpErr.StatusCode
+				}
+			}
+
+			result := UploadResult{
+				ServerURL:    url,
+				Success:      err == nil,
+				Error:        err,
+				StatusCode:   statusCode,
+				ResponseBody: responseBody,
+			}
+
+			if m.verbose {
+				if err == nil {
+					log.Printf("[DEBUG] MirrorParallel: server %d (%s) succeeded in %v", idx+1, url, mirrorDuration)
+				} else {
+					log.Printf("[DEBUG] MirrorParallel: server %d (%s) failed in %v: %v", idx+1, url, mirrorDuration, err)
+				}
+			}
+
+			resultChan <- result
+		}(i, cl, m.serverURLs[i])
+	}
+
+	// Wait for all mirror requests to complete
+	wg.Wait()
+	close(resultChan)
+
+	// Collect results
+	successfulServers := make([]UploadResultWithResponse, 0)
+	errorDetails := make([]string, 0)
+	allStatusCodes := make([]int, 0)
+
+	for result := range resultChan {
+		if result.Success {
+			successfulServers = append(successfulServers, UploadResultWithResponse{
+				ServerURL:    result.ServerURL,
+				ResponseBody: result.ResponseBody,
+			})
+		} else {
+			errorDetails = append(errorDetails, fmt.Sprintf("%s: %v", result.ServerURL, result.Error))
+			if result.StatusCode > 0 {
+				allStatusCodes = append(allStatusCodes, result.StatusCode)
+			}
+		}
+	}
+
+	if m.verbose {
+		log.Printf("[DEBUG] MirrorParallel: successful servers: %d/%d", len(successfulServers), len(m.clients))
+		if len(errorDetails) > 0 {
+			log.Printf("[DEBUG] MirrorParallel: failed servers: %v", errorDetails)
+		}
+	}
+
+	// Check if we have enough successful servers
+	if len(successfulServers) < m.minUploadServers {
+		errMsg := fmt.Sprintf("only %d servers succeeded, need at least %d", len(successfulServers), m.minUploadServers)
+		if len(errorDetails) > 0 {
+			errMsg += fmt.Sprintf(". Errors: %v", errorDetails)
+		}
+
+		// If we have status codes from upstream errors, use the lowest one
+		if len(allStatusCodes) > 0 {
+			minStatusCode := allStatusCodes[0]
+			for _, code := range allStatusCodes[1:] {
+				if code < minStatusCode {
+					minStatusCode = code
+				}
+			}
+
+			if m.verbose {
+				log.Printf("[DEBUG] MirrorParallel: using lowest upstream status code %d (from %v)", minStatusCode, allStatusCodes)
+			}
+			return successfulServers, &UploadError{
+				StatusCode: minStatusCode,
+				Message:    errMsg,
+			}
+		}
+
+		// No status codes available - return 500
+		return successfulServers, fmt.Errorf("%s", errMsg)
+	}
+
+	return successfulServers, nil
+}
+
 // SelectServer selects a server from successful uploads based on the configured strategy
 func (m *Manager) SelectServer(availableServers []UploadResultWithResponse) (*UploadResultWithResponse, error) {
 	if len(availableServers) == 0 {
