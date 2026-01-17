@@ -246,12 +246,22 @@ func (h *BlossomHandler) HandleDownload(w http.ResponseWriter, r *http.Request) 
 	servers, exists := h.cache.Get(hash)
 	if !exists || len(servers) == 0 {
 		if h.verbose {
-			log.Printf("[DEBUG] HandleDownload: hash %s not found in cache", hash)
+			log.Printf("[DEBUG] HandleDownload: hash %s not found in cache, checking upstream servers", hash)
 		}
-		// Hash not in cache, try to find it on upstream servers
-		// For now, return 404. Could implement fallback query later
-		http.Error(w, "Blob not found", http.StatusNotFound)
-		return
+		// Hash not in cache, check upstream servers using HEAD requests
+		servers = h.upstreamManager.CheckHashOnServers(r.Context(), hash)
+		if len(servers) == 0 {
+			if h.verbose {
+				log.Printf("[DEBUG] HandleDownload: hash %s not found on any upstream server", hash)
+			}
+			http.Error(w, "Blob not found", http.StatusNotFound)
+			return
+		}
+		// Update cache with found servers
+		h.cache.Add(hash, servers)
+		if h.verbose {
+			log.Printf("[DEBUG] HandleDownload: hash %s found on %d upstream servers, added to cache", hash, len(servers))
+		}
 	}
 
 	if h.verbose {
@@ -277,6 +287,131 @@ func (h *BlossomHandler) HandleDownload(w http.ResponseWriter, r *http.Request) 
 	}
 
 	http.Redirect(w, r, redirectURL, http.StatusTemporaryRedirect)
+}
+
+// HandleHead handles HEAD /<sha256> requests
+func (h *BlossomHandler) HandleHead(w http.ResponseWriter, r *http.Request) {
+	if h.verbose {
+		log.Printf("[DEBUG] HandleHead: received %s request from %s", r.Method, r.RemoteAddr)
+		log.Printf("[DEBUG] HandleHead: path=%s", r.URL.Path)
+	}
+
+	if r.Method != http.MethodHead {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Extract hash from path (remove leading slash)
+	hash := strings.TrimPrefix(r.URL.Path, "/")
+
+	if h.verbose {
+		log.Printf("[DEBUG] HandleHead: extracted hash: %s", hash)
+	}
+
+	// Validate hash format (should be 64 hex characters for SHA256)
+	if len(hash) != 64 {
+		if h.verbose {
+			log.Printf("[DEBUG] HandleHead: invalid hash length: %d", len(hash))
+		}
+		http.Error(w, "Invalid hash format", http.StatusBadRequest)
+		return
+	}
+
+	// Check if hash is valid hex
+	if _, err := hex.DecodeString(hash); err != nil {
+		if h.verbose {
+			log.Printf("[DEBUG] HandleHead: invalid hash format (not hex): %v", err)
+		}
+		http.Error(w, "Invalid hash format", http.StatusBadRequest)
+		return
+	}
+
+	// Look up hash in cache
+	servers, exists := h.cache.Get(hash)
+	if !exists || len(servers) == 0 {
+		if h.verbose {
+			log.Printf("[DEBUG] HandleHead: hash %s not found in cache, checking upstream servers", hash)
+		}
+		// Hash not in cache, check upstream servers using HEAD requests
+		servers = h.upstreamManager.CheckHashOnServers(r.Context(), hash)
+		if len(servers) == 0 {
+			if h.verbose {
+				log.Printf("[DEBUG] HandleHead: hash %s not found on any upstream server", hash)
+			}
+			http.Error(w, "Blob not found", http.StatusNotFound)
+			return
+		}
+		// Update cache with found servers
+		h.cache.Add(hash, servers)
+		if h.verbose {
+			log.Printf("[DEBUG] HandleHead: hash %s found on %d upstream servers, added to cache", hash, len(servers))
+		}
+	}
+
+	if h.verbose {
+		log.Printf("[DEBUG] HandleHead: hash found with %d servers: %v", len(servers), servers)
+	}
+
+	// Select the first server that has the blob
+	selectedServer, err := h.upstreamManager.SelectServerURL(servers)
+	if err != nil {
+		if h.verbose {
+			log.Printf("[DEBUG] HandleHead: failed to select server: %v", err)
+		}
+		http.Error(w, fmt.Sprintf("Failed to select server: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	if h.verbose {
+		log.Printf("[DEBUG] HandleHead: selected server: %s", selectedServer)
+	}
+
+	// Make HEAD request to the selected upstream server and proxy the headers
+	cl, err := h.upstreamManager.GetClient(selectedServer)
+	if err != nil {
+		if h.verbose {
+			log.Printf("[DEBUG] HandleHead: failed to get client for %s: %v", selectedServer, err)
+		}
+		http.Error(w, fmt.Sprintf("Failed to get client: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	// Use the client's Download method which does a HEAD request
+	// We'll make a direct HEAD request to proxy headers
+	url := fmt.Sprintf("%s/%s", selectedServer, hash)
+	req, err := http.NewRequestWithContext(r.Context(), "HEAD", url, nil)
+	if err != nil {
+		if h.verbose {
+			log.Printf("[DEBUG] HandleHead: failed to create request: %v", err)
+		}
+		http.Error(w, fmt.Sprintf("Failed to create request: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	// Make the request
+	resp, err := cl.(*client.Client).GetHTTPClient().Do(req)
+	if err != nil {
+		if h.verbose {
+			log.Printf("[DEBUG] HandleHead: request failed: %v", err)
+		}
+		http.Error(w, fmt.Sprintf("Request failed: %v", err), http.StatusInternalServerError)
+		return
+	}
+	defer resp.Body.Close()
+
+	// Copy headers from upstream response
+	for k, v := range resp.Header {
+		for _, val := range v {
+			w.Header().Add(k, val)
+		}
+	}
+
+	// Return the status code from upstream
+	w.WriteHeader(resp.StatusCode)
+
+	if h.verbose {
+		log.Printf("[DEBUG] HandleHead: proxied HEAD response with status %d from %s", resp.StatusCode, selectedServer)
+	}
 }
 
 // HandleList handles GET /list/<pubkey> requests

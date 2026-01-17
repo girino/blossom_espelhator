@@ -334,6 +334,70 @@ func (m *Manager) GetServerURLs() []string {
 	return m.serverURLs
 }
 
+// CheckHashOnServers checks all upstream servers in parallel to see which ones have the blob
+// Returns list of server URLs that have the blob
+func (m *Manager) CheckHashOnServers(ctx context.Context, hash string) []string {
+	if m.verbose {
+		log.Printf("[DEBUG] CheckHashOnServers: checking hash %s on %d servers", hash, len(m.clients))
+	}
+
+	// Channel to collect results
+	resultChan := make(chan struct {
+		ServerURL string
+		HasBlob   bool
+	}, len(m.clients))
+
+	// Launch parallel HEAD requests
+	var wg sync.WaitGroup
+	for i, cl := range m.clients {
+		wg.Add(1)
+		go func(idx int, c *client.Client, url string) {
+			defer wg.Done()
+
+			if m.verbose {
+				log.Printf("[DEBUG] CheckHashOnServers: checking server %d: %s", idx+1, url)
+			}
+
+			_, err := c.Download(ctx, hash)
+			hasBlob := err == nil
+
+			resultChan <- struct {
+				ServerURL string
+				HasBlob   bool
+			}{
+				ServerURL: url,
+				HasBlob:   hasBlob,
+			}
+
+			if m.verbose {
+				if hasBlob {
+					log.Printf("[DEBUG] CheckHashOnServers: server %d (%s) has the blob", idx+1, url)
+				} else {
+					log.Printf("[DEBUG] CheckHashOnServers: server %d (%s) does not have the blob", idx+1, url)
+				}
+			}
+		}(i, cl, m.serverURLs[i])
+	}
+
+	// Wait for all checks to complete
+	wg.Wait()
+	close(resultChan)
+
+	// Collect servers that have the blob
+	serversWithBlob := make([]string, 0)
+	for result := range resultChan {
+		if result.HasBlob {
+			serversWithBlob = append(serversWithBlob, result.ServerURL)
+		}
+	}
+
+	if m.verbose {
+		log.Printf("[DEBUG] CheckHashOnServers: hash found on %d servers: %v", len(serversWithBlob), serversWithBlob)
+	}
+
+	return serversWithBlob
+}
+
 // ListParallel queries all upstream servers in parallel for a list of blobs
 func (m *Manager) ListParallel(ctx context.Context, pubkey string) ([]map[string]interface{}, error) {
 	if m.verbose {

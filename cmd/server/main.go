@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/hex"
 	"flag"
 	"log"
 	"net/http"
@@ -56,22 +57,47 @@ func main() {
 			return
 		}
 
-		// Remove leading slash to get hash
-		hash := path[1:]
+		// Remove leading slash
+		hashPath := path[1:]
 
-		// Check if it's a valid hash (64 hex characters)
-		if len(hash) == 64 {
-			switch r.Method {
-			case http.MethodGet:
-				blossomHandler.HandleDownload(w, r)
-			case http.MethodDelete:
-				blossomHandler.HandleDelete(w, r)
-			default:
-				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		// Extract hash - take first 64 characters (hash may be followed by file extension)
+		var hash string
+		if len(hashPath) >= 64 {
+			// Check if first 64 characters are valid hex
+			hashCandidate := hashPath[:64]
+			// Simple check: if all characters after position 64 are not hex, it's likely an extension
+			if len(hashPath) > 64 {
+				// Assume first 64 chars are the hash
+				hash = hashCandidate
+			} else {
+				hash = hashCandidate
 			}
 		} else {
 			http.Error(w, "Not found", http.StatusNotFound)
+			return
 		}
+
+		// Validate hash is 64 hex characters
+		if len(hash) == 64 {
+			// Verify it's valid hex
+			if _, err := hex.DecodeString(hash); err == nil {
+				// Modify the request path to contain only the hash for handlers
+				r.URL.Path = "/" + hash
+				switch r.Method {
+				case http.MethodGet:
+					blossomHandler.HandleDownload(w, r)
+				case http.MethodHead:
+					blossomHandler.HandleHead(w, r)
+				case http.MethodDelete:
+					blossomHandler.HandleDelete(w, r)
+				default:
+					http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+				}
+				return
+			}
+		}
+
+		http.Error(w, "Not found", http.StatusNotFound)
 	})
 
 	// Create HTTP server
