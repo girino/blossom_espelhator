@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -49,12 +50,12 @@ func (c *Client) Upload(ctx context.Context, body io.Reader, contentType string,
 	}
 
 	// Copy additional headers (e.g., Nostr event headers)
+	// Skip Accept-Encoding to let Go's HTTP client handle it automatically
 	for k, v := range headers {
-		req.Header.Set(k, v)
+		if strings.ToLower(k) != "accept-encoding" {
+			req.Header.Set(k, v)
+		}
 	}
-
-	// Explicitly don't request compression (responses are short JSON, uncompressed is fine)
-	req.Header.Del("Accept-Encoding")
 
 	if c.verbose {
 		log.Printf("[DEBUG] Client.Upload: sending request to %s", url)
@@ -118,9 +119,6 @@ func (c *Client) Download(ctx context.Context, hash string) (string, error) {
 		return "", fmt.Errorf("failed to create request: %w", err)
 	}
 
-	// Explicitly don't request compression (responses are short, uncompressed is fine)
-	req.Header.Del("Accept-Encoding")
-
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		if c.verbose {
@@ -153,9 +151,6 @@ func (c *Client) List(ctx context.Context, pubkey string) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
-
-	// Explicitly don't request compression (responses are short, uncompressed is fine)
-	req.Header.Del("Accept-Encoding")
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -201,12 +196,12 @@ func (c *Client) Delete(ctx context.Context, hash string, headers map[string]str
 	}
 
 	// Copy headers (e.g., authentication headers)
+	// Skip Accept-Encoding to let Go's HTTP client handle it automatically
 	for k, v := range headers {
-		req.Header.Set(k, v)
+		if strings.ToLower(k) != "accept-encoding" {
+			req.Header.Set(k, v)
+		}
 	}
-
-	// Explicitly don't request compression (responses are short, uncompressed is fine)
-	req.Header.Del("Accept-Encoding")
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -246,9 +241,6 @@ func (c *Client) CheckHealth(ctx context.Context) error {
 		return fmt.Errorf("failed to create request: %w", err)
 	}
 
-	// Explicitly don't request compression (responses are short, uncompressed is fine)
-	req.Header.Del("Accept-Encoding")
-
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("health check failed: %w", err)
@@ -276,9 +268,6 @@ func (c *Client) Head(ctx context.Context, hash string) (*http.Response, error) 
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
-
-	// Explicitly don't request compression (responses are short, uncompressed is fine)
-	req.Header.Del("Accept-Encoding")
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -311,12 +300,12 @@ func (c *Client) HeadUpload(ctx context.Context, headers map[string]string) (*ht
 	}
 
 	// Copy headers (X-SHA-256, X-Content-Length, X-Content-Type, etc.)
+	// Skip Accept-Encoding to let Go's HTTP client handle it automatically
 	for k, v := range headers {
-		req.Header.Set(k, v)
+		if strings.ToLower(k) != "accept-encoding" {
+			req.Header.Set(k, v)
+		}
 	}
-
-	// Explicitly don't request compression (responses are short, uncompressed is fine)
-	req.Header.Del("Accept-Encoding")
 
 	if c.verbose {
 		log.Printf("[DEBUG] Client.HeadUpload: sending HEAD request to %s", url)
@@ -362,12 +351,12 @@ func (c *Client) Mirror(ctx context.Context, body io.Reader, contentType string,
 	}
 
 	// Copy additional headers (e.g., Nostr event headers)
+	// Skip Accept-Encoding to let Go's HTTP client handle it automatically
 	for k, v := range headers {
-		req.Header.Set(k, v)
+		if strings.ToLower(k) != "accept-encoding" {
+			req.Header.Set(k, v)
+		}
 	}
-
-	// Explicitly don't request compression (responses are short, uncompressed is fine)
-	req.Header.Del("Accept-Encoding")
 
 	if c.verbose {
 		log.Printf("[DEBUG] Client.Mirror: sending request to %s", url)
