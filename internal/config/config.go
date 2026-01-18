@@ -36,7 +36,9 @@ type ServerConfig struct {
 	MaxRetries       int           `yaml:"max_retries"`
 
 	// Health check configuration
-	MaxFailures int `yaml:"max_failures"` // Maximum consecutive failures before marking server unhealthy
+	MaxFailures    int   `yaml:"max_failures"`     // Maximum consecutive failures before marking server unhealthy
+	MaxGoroutines  int   `yaml:"max_goroutines"`   // Maximum number of goroutines before marking system unhealthy
+	MaxMemoryBytes int64 `yaml:"max_memory_bytes"` // Maximum memory usage in bytes before marking system unhealthy
 }
 
 // Load reads and parses the configuration file
@@ -69,6 +71,12 @@ func Load(path string) (*Config, error) {
 	}
 	if config.Server.MaxFailures == 0 {
 		config.Server.MaxFailures = 5 // Default: 5 consecutive failures before unhealthy
+	}
+	if config.Server.MaxGoroutines == 0 {
+		config.Server.MaxGoroutines = 1000 // Default: 1000 goroutines max
+	}
+	if config.Server.MaxMemoryBytes == 0 {
+		config.Server.MaxMemoryBytes = 512 * 1024 * 1024 // Default: 512 MB
 	}
 
 	// Set default capabilities for upstream servers (default to false for optional endpoints)

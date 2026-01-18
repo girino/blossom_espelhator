@@ -9,6 +9,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"runtime"
 	"strings"
 
 	"github.com/girino/blossom_espelhator/internal/cache"
@@ -1000,11 +1001,35 @@ func (h *BlossomHandler) HandleHealth(w http.ResponseWriter, r *http.Request) {
 
 	allStats := h.stats.GetAll()
 
+	// Get system metrics
+	var m runtime.MemStats
+	runtime.ReadMemStats(&m)
+	memoryBytes := int64(m.Alloc)
+	goroutines := runtime.NumGoroutine()
+
+	// Check if system metrics are healthy
+	memoryHealthy := memoryBytes < h.config.Server.MaxMemoryBytes
+	goroutinesHealthy := goroutines < h.config.Server.MaxGoroutines
+	serversHealthy := healthyCount >= minUploadServers
+
+	// System is healthy if all checks pass
+	systemHealthy := memoryHealthy && goroutinesHealthy && serversHealthy
+
 	response := map[string]interface{}{
-		"healthy":            healthyCount >= minUploadServers,
+		"healthy":            systemHealthy,
 		"healthy_count":      healthyCount,
 		"min_upload_servers": minUploadServers,
-		"servers":            make(map[string]interface{}),
+		"memory": map[string]interface{}{
+			"bytes":   memoryBytes,
+			"max":     h.config.Server.MaxMemoryBytes,
+			"healthy": memoryHealthy,
+		},
+		"goroutines": map[string]interface{}{
+			"count":   goroutines,
+			"max":     h.config.Server.MaxGoroutines,
+			"healthy": goroutinesHealthy,
+		},
+		"servers": make(map[string]interface{}),
 	}
 
 	// Add server health details
@@ -1017,7 +1042,7 @@ func (h *BlossomHandler) HandleHealth(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	if healthyCount >= minUploadServers {
+	if systemHealthy {
 		w.WriteHeader(http.StatusOK)
 	} else {
 		w.WriteHeader(http.StatusServiceUnavailable)
@@ -1036,8 +1061,22 @@ func (h *BlossomHandler) HandleStats(w http.ResponseWriter, r *http.Request) {
 
 	allStats := h.stats.GetAll()
 
+	// Get system metrics
+	var m runtime.MemStats
+	runtime.ReadMemStats(&m)
+	memoryBytes := int64(m.Alloc)
+	goroutines := runtime.NumGoroutine()
+
 	response := map[string]interface{}{
 		"servers": allStats,
+		"memory": map[string]interface{}{
+			"bytes": memoryBytes,
+			"max":   h.config.Server.MaxMemoryBytes,
+		},
+		"goroutines": map[string]interface{}{
+			"count": goroutines,
+			"max":   h.config.Server.MaxGoroutines,
+		},
 	}
 
 	// Calculate totals

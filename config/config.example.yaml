@@ -38,3 +38,10 @@ server:
   # Maximum consecutive failures before marking a server as unhealthy
   # If a server exceeds this threshold, it is marked unhealthy
   max_failures: 5
+  
+  # Maximum number of goroutines before marking system unhealthy
+  max_goroutines: 1000
+  
+  # Maximum memory usage in bytes before marking system unhealthy
+  # Default: 512 MB (512 * 1024 * 1024 bytes)
+  max_memory_bytes: 536870912
