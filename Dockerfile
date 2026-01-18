@@ -42,7 +42,7 @@ EXPOSE 7624
 
 # Health check (checks port 7624 by default, can be overridden by docker-compose)
 HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
-  CMD wget --no-verbose --tries=1 --spider http://localhost:7624/health || exit 1
+  CMD wget --no-verbose --tries=1 --output-document=/dev/null http://localhost:7624/health || exit 1
 
 # Run the application
 CMD ["./blossom_espelhator", "-config", "/app/config/config.yaml"]

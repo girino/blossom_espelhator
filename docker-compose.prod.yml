@@ -20,7 +20,7 @@ services:
       # Label for autoheal to identify this container (project-specific)
       - "blossom.espelhator.autoheal=true"
     healthcheck:
-      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:7624/health"]
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--output-document=/dev/null", "http://localhost:7624/health"]
       interval: 30s
       timeout: 3s
       retries: 3
