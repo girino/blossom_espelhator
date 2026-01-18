@@ -2,16 +2,12 @@ package client
 
 import (
 	"bytes"
-	"compress/gzip"
 	"context"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
-	"strings"
 	"time"
-
-	"github.com/andybalholm/brotli"
 )
 
 // Client is an HTTP client for communicating with Blossom servers
@@ -77,25 +73,13 @@ func (c *Client) Upload(ctx context.Context, body io.Reader, contentType string,
 		log.Printf("[DEBUG] Client.Upload: response received after %v - status=%d, headers=%v", duration, resp.StatusCode, resp.Header)
 	}
 
-	// Read response body
+	// Read response body (gzip will be automatically decompressed by Go's http client)
 	bodyBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
 		if c.verbose {
 			log.Printf("[DEBUG] Client.Upload: failed to read response body: %v", err)
 		}
 		bodyBytes = nil
-	}
-
-	// Decompress if needed
-	contentEncoding := resp.Header.Get("Content-Encoding")
-	if contentEncoding != "" && bodyBytes != nil {
-		bodyBytes, err = decompressBody(bodyBytes, contentEncoding)
-		if err != nil {
-			if c.verbose {
-				log.Printf("[DEBUG] Client.Upload: failed to decompress response body (encoding=%s): %v", contentEncoding, err)
-			}
-			// Continue with original body if decompression fails
-		}
 	}
 
 	// Accept 200, 201, and 202 as success status codes
@@ -131,6 +115,9 @@ func (c *Client) Download(ctx context.Context, hash string) (string, error) {
 		return "", fmt.Errorf("failed to create request: %w", err)
 	}
 
+	// Tell server we only accept gzip, not brotli
+	req.Header.Set("Accept-Encoding", "gzip")
+
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		if c.verbose {
@@ -163,6 +150,9 @@ func (c *Client) List(ctx context.Context, pubkey string) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
+
+	// Tell server we only accept gzip, not brotli
+	req.Header.Set("Accept-Encoding", "gzip")
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -207,6 +197,9 @@ func (c *Client) Delete(ctx context.Context, hash string, headers map[string]str
 		return fmt.Errorf("failed to create request: %w", err)
 	}
 
+	// Tell server we only accept gzip, not brotli
+	req.Header.Set("Accept-Encoding", "gzip")
+
 	// Copy headers (e.g., authentication headers)
 	for k, v := range headers {
 		req.Header.Set(k, v)
@@ -250,6 +243,9 @@ func (c *Client) CheckHealth(ctx context.Context) error {
 		return fmt.Errorf("failed to create request: %w", err)
 	}
 
+	// Tell server we only accept gzip, not brotli
+	req.Header.Set("Accept-Encoding", "gzip")
+
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("health check failed: %w", err)
@@ -277,6 +273,9 @@ func (c *Client) Head(ctx context.Context, hash string) (*http.Response, error) 
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
+
+	// Tell server we only accept gzip, not brotli
+	req.Header.Set("Accept-Encoding", "gzip")
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -307,6 +306,9 @@ func (c *Client) HeadUpload(ctx context.Context, headers map[string]string) (*ht
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
+
+	// Tell server we only accept gzip, not brotli
+	req.Header.Set("Accept-Encoding", "gzip")
 
 	// Copy headers (X-SHA-256, X-Content-Length, X-Content-Type, etc.)
 	for k, v := range headers {
@@ -352,6 +354,9 @@ func (c *Client) Mirror(ctx context.Context, body io.Reader, contentType string,
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 
+	// Tell server we only accept gzip, not brotli
+	req.Header.Set("Accept-Encoding", "gzip")
+
 	if contentType != "" {
 		req.Header.Set("Content-Type", contentType)
 	}
@@ -381,25 +386,13 @@ func (c *Client) Mirror(ctx context.Context, body io.Reader, contentType string,
 		log.Printf("[DEBUG] Client.Mirror: response received after %v - status=%d, headers=%v", duration, resp.StatusCode, resp.Header)
 	}
 
-	// Read response body
+	// Read response body (gzip will be automatically decompressed by Go's http client)
 	bodyBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
 		if c.verbose {
 			log.Printf("[DEBUG] Client.Mirror: failed to read response body: %v", err)
 		}
 		bodyBytes = nil
-	}
-
-	// Decompress if needed
-	contentEncoding := resp.Header.Get("Content-Encoding")
-	if contentEncoding != "" && bodyBytes != nil {
-		bodyBytes, err = decompressBody(bodyBytes, contentEncoding)
-		if err != nil {
-			if c.verbose {
-				log.Printf("[DEBUG] Client.Mirror: failed to decompress response body (encoding=%s): %v", contentEncoding, err)
-			}
-			// Continue with original body if decompression fails
-		}
 	}
 
 	// Accept 200, 201, and 202 as success status codes
@@ -424,37 +417,4 @@ func (c *Client) Mirror(ctx context.Context, body io.Reader, contentType string,
 // UploadWithBody uploads using a byte slice body
 func (c *Client) UploadWithBody(ctx context.Context, body []byte, contentType string, headers map[string]string) ([]byte, error) {
 	return c.Upload(ctx, bytes.NewReader(body), contentType, headers)
-}
-
-// decompressBody decompresses the response body based on Content-Encoding header
-// Supports: br (brotli), gzip, deflate
-// Returns decompressed body or original body if decompression fails or encoding is not supported
-func decompressBody(bodyBytes []byte, contentEncoding string) ([]byte, error) {
-	encoding := strings.ToLower(strings.TrimSpace(contentEncoding))
-	
-	switch encoding {
-	case "br":
-		// Brotli decompression
-		reader := brotli.NewReader(bytes.NewReader(bodyBytes))
-		decompressed, err := io.ReadAll(reader)
-		if err != nil {
-			return nil, fmt.Errorf("brotli decompression failed: %w", err)
-		}
-		return decompressed, nil
-	case "gzip":
-		// Gzip decompression (though Go's http client should handle this automatically)
-		reader, err := gzip.NewReader(bytes.NewReader(bodyBytes))
-		if err != nil {
-			return nil, fmt.Errorf("gzip reader creation failed: %w", err)
-		}
-		defer reader.Close()
-		decompressed, err := io.ReadAll(reader)
-		if err != nil {
-			return nil, fmt.Errorf("gzip decompression failed: %w", err)
-		}
-		return decompressed, nil
-	default:
-		// Unknown or unsupported encoding - return original body
-		return bodyBytes, nil
-	}
 }
