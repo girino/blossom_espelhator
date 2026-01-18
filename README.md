@@ -149,6 +149,11 @@ server:
   # System resource limits for health checks
   max_goroutines: 1000             # Maximum allowed goroutines before marking system unhealthy
   max_memory_bytes: 536870912      # Maximum memory usage in bytes (512 MB) before marking system unhealthy
+  
+  # Authentication: List of allowed pubkeys (hex format or npub bech32 format)
+  # If empty or not set, authentication is disabled
+  # See Authentication Configuration section for details
+  allowed_pubkeys: []
 ```
 
 ### Redirect Strategies
@@ -178,6 +183,48 @@ The `base_url` option (optional) is used when `redirect_strategy` is `"local"`:
 - `priority`: Priority number for server selection when using `priority` strategy (lower is better, required)
 - `supports_mirror`: If `true`, the server supports BUD-04 `/mirror` endpoint (optional, defaults to `false`)
 - `supports_upload_head`: If `true`, the server supports BUD-06 `HEAD /upload` preflight checks (optional, defaults to `false`)
+
+### Authentication Configuration
+
+The `allowed_pubkeys` option enables authentication per [BUD-01](https://raw.githubusercontent.com/hzrd149/blossom/refs/heads/master/buds/01.md):
+
+- **If `allowed_pubkeys` is empty or not set**: Authentication is disabled, all requests are allowed
+- **If `allowed_pubkeys` contains pubkeys**: Only requests with valid Nostr authorization events from those pubkeys are accepted
+
+Pubkeys can be specified in either format:
+- **Hex format**: 64 hexadecimal characters (e.g., `b53185b9f27962ebdf76b8a9b0a84cd8b27f9f3d4abd59f715788a3bf9e7f75e`)
+- **npub format**: bech32-encoded public key starting with `npub` (e.g., `npub1xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx`)
+
+Both formats are normalized to hex internally for comparison. Invalid pubkeys in the configuration are logged as warnings and skipped.
+
+#### Authentication Requirements (BUD-01)
+
+When `allowed_pubkeys` is configured, the following endpoints require authentication:
+- `PUT /upload` - requires `t` tag with value `"upload"`
+- `PUT /mirror` - requires `t` tag with value `"upload"` (uses upload event format)
+- `DELETE /<sha256>` - requires `t` tag with value `"delete"`
+- `GET /list/<pubkey>` - requires `t` tag with value `"list"`
+
+Authorization events must:
+1. Be kind `24242` (Blossom upload event format)
+2. Have `created_at` in the past
+3. Have `expiration` tag with future Unix timestamp
+4. Have `t` tag matching the endpoint verb (`upload`, `delete`, `list`)
+5. Have `pubkey` matching one in `allowed_pubkeys` (64 hex characters)
+6. Be sent in `Authorization` header: `Authorization: Nostr <base64-encoded-event-json>`
+
+Example configuration:
+```yaml
+server:
+  allowed_pubkeys:
+    - "b53185b9f27962ebdf76b8a9b0a84cd8b27f9f3d4abd59f715788a3bf9e7f75e"  # hex format
+    - "npub1xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"  # npub format
+    - "ec0d11351457798907a3900fe465bfdc3b081be6efeb3d68c4d67774c0bc1f9a"  # hex format
+```
+
+Errors are returned with `X-Reason` header per BUD-01:
+- `401 Unauthorized`: Missing or invalid authorization header/event
+- `403 Forbidden`: Pubkey not in allowed list
 
 ## Running
 
@@ -259,7 +306,7 @@ The `base_url` option (optional) is used when `redirect_strategy` is `"local"`:
 ### Blossom Protocol Endpoints
 
 - **PUT /upload** - Upload a file (forwards to multiple upstream servers)
-  - Requires Nostr authentication (kind 24242 event)
+  - Requires Nostr authentication (kind 24242 event) if `allowed_pubkeys` is configured
   - Forwards to at least `min_upload_servers` upstream servers
   - Returns response with `nip94` array containing URLs and metadata
   - If `redirect_strategy` is `"local"`, response URL uses local format (`base_url/sha256.ext`)
@@ -267,14 +314,17 @@ The `base_url` option (optional) is used when `redirect_strategy` is `"local"`:
 - **HEAD /upload** - Upload preflight check (BUD-06)
   - Headers: `X-SHA-256`, `X-Content-Length`, `X-Content-Type`
   - Checks if upstream servers would accept the upload
+  - Authentication optional (not enforced by proxy)
 
 - **PUT /mirror** - Mirror a blob (BUD-04)
   - Request body: `{"url": "<blob-url>"}`
+  - Requires Nostr authentication (kind 24242 event) if `allowed_pubkeys` is configured
   - Only forwards to servers with `supports_mirror: true`
   - Returns response with `nip94` array
   - If `redirect_strategy` is `"local"`, response URL uses local format (`base_url/sha256.ext`)
 
 - **GET /list/<pubkey>** - List files for a pubkey
+  - Requires Nostr authentication (kind 24242 event) if `allowed_pubkeys` is configured
   - Queries all upstream servers in parallel
   - Merges and deduplicates results based on `sha256`
   - Returns list with `nip94` tags for each item
@@ -283,12 +333,15 @@ The `base_url` option (optional) is used when `redirect_strategy` is `"local"`:
 - **GET /<sha256>.<ext>** - Download file
   - Redirects to one of the upstream servers that has the file
   - Uses configured redirect strategy (round_robin, random, priority, health_based, or local with round-robin)
+  - Authentication optional (not enforced by proxy, may be required by upstream servers)
 
 - **HEAD /<sha256>.<ext>** - Check file existence
   - Proxies HEAD request to upstream server
   - Returns headers and status code from upstream
+  - Authentication optional (not enforced by proxy, may be required by upstream servers)
 
 - **DELETE /<sha256>** - Delete file
+  - Requires Nostr authentication (kind 24242 event) if `allowed_pubkeys` is configured
   - Forwards delete to all upstream servers that have the file
   - Removes from cache after successful deletion
 

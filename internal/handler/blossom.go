@@ -12,6 +12,7 @@ import (
 	"runtime"
 	"strings"
 
+	"github.com/girino/blossom_espelhator/internal/auth"
 	"github.com/girino/blossom_espelhator/internal/cache"
 	"github.com/girino/blossom_espelhator/internal/config"
 	"github.com/girino/blossom_espelhator/internal/stats"
@@ -122,16 +123,25 @@ type BlossomHandler struct {
 	stats           *stats.Stats
 	config          *config.Config
 	verbose         bool
+	allowedPubkeys  map[string]bool // Map of allowed pubkeys for authentication
 }
 
 // New creates a new Blossom handler
 func New(upstreamManager *upstream.Manager, cache *cache.Cache, statsTracker *stats.Stats, cfg *config.Config, verbose bool) *BlossomHandler {
+	allowedPubkeys := auth.BuildAllowedPubkeysMap(cfg.Server.AllowedPubkeys)
+	if verbose && len(allowedPubkeys) > 0 {
+		log.Printf("[DEBUG] BlossomHandler: authentication enabled with %d allowed pubkeys", len(allowedPubkeys))
+	} else if verbose {
+		log.Printf("[DEBUG] BlossomHandler: authentication disabled (no allowed_pubkeys configured)")
+	}
+
 	return &BlossomHandler{
 		upstreamManager: upstreamManager,
 		cache:           cache,
 		stats:           statsTracker,
 		config:          cfg,
 		verbose:         verbose,
+		allowedPubkeys:  allowedPubkeys,
 	}
 }
 
@@ -156,6 +166,26 @@ func (h *BlossomHandler) HandleUpload(w http.ResponseWriter, r *http.Request) {
 		}
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
+	}
+
+	// Validate authentication if pubkeys are configured
+	if len(h.allowedPubkeys) > 0 {
+		_, err := auth.ValidateAuth(r, "upload", h.allowedPubkeys, h.verbose)
+		if err != nil {
+			if authErr, ok := err.(*auth.AuthError); ok {
+				if h.verbose {
+					log.Printf("[DEBUG] HandleUpload: authentication failed: %s", authErr.Reason)
+				}
+				w.Header().Set("X-Reason", authErr.Reason)
+				http.Error(w, authErr.Reason, authErr.Code)
+				return
+			}
+			if h.verbose {
+				log.Printf("[DEBUG] HandleUpload: authentication error: %v", err)
+			}
+			http.Error(w, fmt.Sprintf("Authentication error: %v", err), http.StatusUnauthorized)
+			return
+		}
 	}
 
 	// Read the request body
@@ -415,6 +445,26 @@ func (h *BlossomHandler) HandleMirror(w http.ResponseWriter, r *http.Request) {
 		}
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
+	}
+
+	// Validate authentication if pubkeys are configured
+	if len(h.allowedPubkeys) > 0 {
+		_, err := auth.ValidateAuth(r, "upload", h.allowedPubkeys, h.verbose)
+		if err != nil {
+			if authErr, ok := err.(*auth.AuthError); ok {
+				if h.verbose {
+					log.Printf("[DEBUG] HandleMirror: authentication failed: %s", authErr.Reason)
+				}
+				w.Header().Set("X-Reason", authErr.Reason)
+				http.Error(w, authErr.Reason, authErr.Code)
+				return
+			}
+			if h.verbose {
+				log.Printf("[DEBUG] HandleMirror: authentication error: %v", err)
+			}
+			http.Error(w, fmt.Sprintf("Authentication error: %v", err), http.StatusUnauthorized)
+			return
+		}
 	}
 
 	// Read the request body
@@ -954,6 +1004,26 @@ func (h *BlossomHandler) HandleList(w http.ResponseWriter, r *http.Request) {
 		log.Printf("[DEBUG] HandleList: extracted pubkey: %s", path)
 	}
 
+	// Validate authentication if pubkeys are configured
+	if len(h.allowedPubkeys) > 0 {
+		_, err := auth.ValidateAuth(r, "list", h.allowedPubkeys, h.verbose)
+		if err != nil {
+			if authErr, ok := err.(*auth.AuthError); ok {
+				if h.verbose {
+					log.Printf("[DEBUG] HandleList: authentication failed: %s", authErr.Reason)
+				}
+				w.Header().Set("X-Reason", authErr.Reason)
+				http.Error(w, authErr.Reason, authErr.Code)
+				return
+			}
+			if h.verbose {
+				log.Printf("[DEBUG] HandleList: authentication error: %v", err)
+			}
+			http.Error(w, fmt.Sprintf("Authentication error: %v", err), http.StatusUnauthorized)
+			return
+		}
+	}
+
 	// Query all upstream servers in parallel and merge results
 	mergedResults, listResults, err := h.upstreamManager.ListParallelWithResults(r.Context(), path)
 	if err != nil {
@@ -1043,6 +1113,26 @@ func (h *BlossomHandler) HandleDelete(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodDelete {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
+	}
+
+	// Validate authentication if pubkeys are configured
+	if len(h.allowedPubkeys) > 0 {
+		_, err := auth.ValidateAuth(r, "delete", h.allowedPubkeys, h.verbose)
+		if err != nil {
+			if authErr, ok := err.(*auth.AuthError); ok {
+				if h.verbose {
+					log.Printf("[DEBUG] HandleDelete: authentication failed: %s", authErr.Reason)
+				}
+				w.Header().Set("X-Reason", authErr.Reason)
+				http.Error(w, authErr.Reason, authErr.Code)
+				return
+			}
+			if h.verbose {
+				log.Printf("[DEBUG] HandleDelete: authentication error: %v", err)
+			}
+			http.Error(w, fmt.Sprintf("Authentication error: %v", err), http.StatusUnauthorized)
+			return
+		}
 	}
 
 	// Extract hash from path

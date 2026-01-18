@@ -60,3 +60,13 @@ server:
   # Maximum memory usage in bytes before marking system unhealthy
   # Default: 512 MB (512 * 1024 * 1024 bytes)
   max_memory_bytes: 536870912
+  
+  # Authentication: List of allowed pubkeys (hex format or npub bech32 format)
+  # If empty or not set, authentication is disabled
+  # Authorization events must use kind 24242 per BUD-01
+  # Only events from pubkeys in this list will be accepted
+  # Both hex (64 characters) and npub (bech32) formats are supported
+  # Example:
+  #   - "b53185b9f27962ebdf76b8a9b0a84cd8b27f9f3d4abd59f715788a3bf9e7f75e"  # hex format
+  #   - "npub1xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"  # npub format
+  allowed_pubkeys: []

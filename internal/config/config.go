@@ -40,6 +40,9 @@ type ServerConfig struct {
 	MaxFailures    int   `yaml:"max_failures"`     // Maximum consecutive failures before marking server unhealthy
 	MaxGoroutines  int   `yaml:"max_goroutines"`   // Maximum number of goroutines before marking system unhealthy
 	MaxMemoryBytes int64 `yaml:"max_memory_bytes"` // Maximum memory usage in bytes before marking system unhealthy
+
+	// Authentication configuration
+	AllowedPubkeys []string `yaml:"allowed_pubkeys"` // List of allowed pubkeys (hex format or npub bech32 format). If empty, auth is disabled
 }
 
 // Load reads and parses the configuration file
