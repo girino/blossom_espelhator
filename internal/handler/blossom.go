@@ -62,23 +62,29 @@ func mimeTypeToExtension(mimeType string) string {
 }
 
 // constructLocalURL constructs a local URL in the format baseurl/sha256.ext
-// Base URL is always derived from the request (scheme + host)
+// Base URL is from config if set, otherwise derived from the request (scheme + host)
 // Extracts extension from: 1) URL path if available, 2) mime type, 3) none if neither available
 func (h *BlossomHandler) constructLocalURL(hash string, mimeType string, r *http.Request) string {
-	// Derive base URL from request
-	scheme := "http"
-	if r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https" {
-		scheme = "https"
-	}
-	host := r.Host
-	if host == "" {
-		host = "localhost"
-		if h.config.Server.ListenAddr != "" {
-			addr := strings.TrimPrefix(h.config.Server.ListenAddr, ":")
-			host = fmt.Sprintf("localhost:%s", addr)
+	// Use configured base URL if set, otherwise derive from request
+	var baseURL string
+	if h.config.Server.BaseURL != "" {
+		baseURL = h.config.Server.BaseURL
+	} else {
+		// Derive base URL from request
+		scheme := "http"
+		if r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https" {
+			scheme = "https"
 		}
+		host := r.Host
+		if host == "" {
+			host = "localhost"
+			if h.config.Server.ListenAddr != "" {
+				addr := strings.TrimPrefix(h.config.Server.ListenAddr, ":")
+				host = fmt.Sprintf("localhost:%s", addr)
+			}
+		}
+		baseURL = fmt.Sprintf("%s://%s", scheme, host)
 	}
-	baseURL := fmt.Sprintf("%s://%s", scheme, host)
 
 	// Try to get extension from URL path first (e.g., /abc123.png)
 	ext := ""

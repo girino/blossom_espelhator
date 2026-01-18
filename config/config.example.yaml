@@ -30,9 +30,18 @@ server:
   # - "random": Randomly selects from available servers
   # - "health_based": Uses round-robin (health checking not yet implemented)
   # - "priority": Selects server with lowest priority number (lower is better)
-  # - "local": Returns local URL (base_url/sha256.ext) where base_url is derived from request
-  #            and ext is derived from mime type or file extension
+  # - "local": Returns local URL (base_url/sha256.ext) in response URLs (upload/mirror/list)
+  #            Downloads still redirect to upstream servers using round-robin
+  #            Extension is derived from mime type or file extension
   redirect_strategy: "round_robin"
+  
+  # Base URL for constructing local URLs (independent of redirect_strategy)
+  # If set, this URL will be used when constructing local URLs (when redirect_strategy is "local")
+  # If not set or empty, base URL will be derived from the request
+  # Useful for reverse proxy scenarios where you want to force a specific public URL
+  # Example: "https://blossom.example.com" or "http://localhost:8080"
+  # Note: Only affects response URLs when redirect_strategy is "local", does not affect redirects
+  base_url: ""
   
   # Timeout for upstream server requests
   timeout: 30s

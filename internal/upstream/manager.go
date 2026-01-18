@@ -28,6 +28,7 @@ type Manager struct {
 	roundRobinMutex    sync.Mutex
 	timeout            time.Duration
 	verbose            bool
+	getTotalFailures   func(string) int64 // Function to get total failures for a server (for health_based strategy)
 }
 
 // serverCapabilities stores which endpoints a server supports
@@ -98,7 +99,13 @@ func New(cfg *config.Config, verbose bool) (*Manager, error) {
 		redirectStrategy:   cfg.Server.RedirectStrategy,
 		timeout:            cfg.Server.Timeout,
 		verbose:            verbose,
+		getTotalFailures:   nil, // Will be set via SetFailureGetter if needed
 	}, nil
+}
+
+// SetFailureGetter sets the function to get total failures for health_based strategy
+func (m *Manager) SetFailureGetter(getter func(string) int64) {
+	m.getTotalFailures = getter
 }
 
 // UploadResultWithResponse contains a successful server URL and its response body
@@ -239,7 +246,7 @@ func (m *Manager) UploadParallel(ctx context.Context, body io.Reader, contentTyp
 		}
 
 		// No status codes available - return 500
-		return successfulServers, fmt.Errorf(errMsg)
+		return successfulServers, fmt.Errorf("%s", errMsg)
 	}
 
 	if m.verbose {
@@ -421,9 +428,7 @@ func (m *Manager) SelectServer(availableServers []UploadResultWithResponse) (*Up
 	case "priority":
 		selected = m.selectPriorityWithResponse(availableServers)
 	case "health_based":
-		// For now, fall back to round-robin
-		// Health checking can be added later
-		selected = m.selectRoundRobinWithResponse(availableServers)
+		selected = m.selectHealthBasedWithResponse(availableServers)
 	default:
 		// Default to round-robin
 		selected = m.selectRoundRobinWithResponse(availableServers)
@@ -450,6 +455,56 @@ func (m *Manager) selectRoundRobinWithResponse(availableServers []UploadResultWi
 func (m *Manager) selectRandomWithResponse(availableServers []UploadResultWithResponse) *UploadResultWithResponse {
 	selected := &availableServers[rand.Intn(len(availableServers))]
 	return selected
+}
+
+// selectHealthBasedWithResponse selects servers with the lowest total failures, then uses round-robin within that group
+func (m *Manager) selectHealthBasedWithResponse(availableServers []UploadResultWithResponse) *UploadResultWithResponse {
+	if len(availableServers) == 0 {
+		return nil
+	}
+
+	// If no failure getter is set, fall back to round-robin
+	if m.getTotalFailures == nil {
+		return m.selectRoundRobinWithResponse(availableServers)
+	}
+
+	// Group servers by total failures
+	serversByFailures := make(map[int64][]*UploadResultWithResponse)
+	var minFailures int64 = -1
+
+	for i := range availableServers {
+		serverURL := availableServers[i].ServerURL
+		totalFailures := m.getTotalFailures(serverURL)
+		serversByFailures[totalFailures] = append(serversByFailures[totalFailures], &availableServers[i])
+
+		// Track minimum failures
+		if minFailures == -1 || totalFailures < minFailures {
+			minFailures = totalFailures
+		}
+	}
+
+	// Get servers with minimum failures
+	bestServers := serversByFailures[minFailures]
+	if len(bestServers) == 0 {
+		// Shouldn't happen, but fallback
+		return &availableServers[0]
+	}
+
+	if m.verbose {
+		serverURLs := make([]string, len(bestServers))
+		for i, srv := range bestServers {
+			serverURLs[i] = srv.ServerURL
+		}
+		log.Printf("[DEBUG] selectHealthBasedWithResponse: %d servers with minimum failures (%d): %v", len(bestServers), minFailures, serverURLs)
+	}
+
+	// Use round-robin within the best servers group
+	// Convert to slice of UploadResultWithResponse for round-robin
+	bestServersSlice := make([]UploadResultWithResponse, len(bestServers))
+	for i, srv := range bestServers {
+		bestServersSlice[i] = *srv
+	}
+	return m.selectRoundRobinWithResponse(bestServersSlice)
 }
 
 // selectPriorityWithResponse selects the server with the lowest priority number (lower is better)
@@ -504,9 +559,7 @@ func (m *Manager) SelectServerURL(availableServers []string) (string, error) {
 		// "Local" only affects response URLs in upload/mirror/list endpoints
 		selected = m.selectRoundRobin(availableServers)
 	case "health_based":
-		// For now, fall back to round-robin
-		// Health checking can be added later
-		selected = m.selectRoundRobin(availableServers)
+		selected = m.selectHealthBased(availableServers)
 	default:
 		// Default to round-robin
 		selected = m.selectRoundRobin(availableServers)
@@ -532,6 +585,47 @@ func (m *Manager) selectRoundRobin(availableServers []string) string {
 // selectRandom selects a random server (legacy for downloads)
 func (m *Manager) selectRandom(availableServers []string) string {
 	return availableServers[rand.Intn(len(availableServers))]
+}
+
+// selectHealthBased selects servers with the lowest total failures, then uses round-robin within that group
+// Total failures = sum of upload, mirror, delete, and list failures
+func (m *Manager) selectHealthBased(availableServers []string) string {
+	if len(availableServers) == 0 {
+		return ""
+	}
+
+	// If no failure getter is set, fall back to round-robin
+	if m.getTotalFailures == nil {
+		return m.selectRoundRobin(availableServers)
+	}
+
+	// Group servers by total failures
+	serversByFailures := make(map[int64][]string)
+	var minFailures int64 = -1
+
+	for _, serverURL := range availableServers {
+		totalFailures := m.getTotalFailures(serverURL)
+		serversByFailures[totalFailures] = append(serversByFailures[totalFailures], serverURL)
+
+		// Track minimum failures
+		if minFailures == -1 || totalFailures < minFailures {
+			minFailures = totalFailures
+		}
+	}
+
+	// Get servers with minimum failures
+	bestServers := serversByFailures[minFailures]
+	if len(bestServers) == 0 {
+		// Shouldn't happen, but fallback
+		return availableServers[0]
+	}
+
+	if m.verbose {
+		log.Printf("[DEBUG] selectHealthBased: %d servers with minimum failures (%d): %v", len(bestServers), minFailures, bestServers)
+	}
+
+	// Use round-robin within the best servers group
+	return m.selectRoundRobin(bestServers)
 }
 
 // selectPriority selects the server with the lowest priority number (lower is better)

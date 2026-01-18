@@ -44,6 +44,9 @@ func main() {
 	allServerURLs := upstreamManager.GetServerURLs()
 	statsTracker.InitializeServers(allServerURLs)
 
+	// Set failure getter for health_based strategy
+	upstreamManager.SetFailureGetter(statsTracker.GetTotalFailures)
+
 	// Initialize handler
 	blossomHandler := handler.New(upstreamManager, cache, statsTracker, cfg, *verbose)
 

@@ -32,6 +32,7 @@ type ServerConfig struct {
 	ListenAddr       string        `yaml:"listen_addr"`
 	MinUploadServers int           `yaml:"min_upload_servers"`
 	RedirectStrategy string        `yaml:"redirect_strategy"`
+	BaseURL          string        `yaml:"base_url"` // Base URL for local strategy (overrides request-derived URL)
 	Timeout          time.Duration `yaml:"timeout"`
 	MaxRetries       int           `yaml:"max_retries"`
 

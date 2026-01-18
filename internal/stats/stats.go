@@ -181,3 +181,17 @@ func (s *Stats) InitializeServers(serverURLs []string) {
 		}
 	}
 }
+
+// GetTotalFailures returns the total number of failures for a server
+// Sums upload, mirror, delete, and list failures
+func (s *Stats) GetTotalFailures(serverURL string) int64 {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	stats, exists := s.serverStats[serverURL]
+	if !exists {
+		return 0
+	}
+
+	return stats.UploadsFailure + stats.MirrorsFailure + stats.DeletesFailure + stats.ListsFailure
+}
