@@ -20,6 +20,7 @@ import (
 type Manager struct {
 	clients            []*client.Client
 	serverURLs         []string
+	serverPriorities   []int                // Priority for each server (indexed same as clients/serverURLs)
 	serverCapabilities []serverCapabilities // Capabilities for each server (indexed same as clients/serverURLs)
 	minUploadServers   int
 	redirectStrategy   string
@@ -62,12 +63,14 @@ func New(cfg *config.Config, verbose bool) (*Manager, error) {
 
 	clients := make([]*client.Client, 0, len(cfg.UpstreamServers))
 	serverURLs := make([]string, 0, len(cfg.UpstreamServers))
+	serverPriorities := make([]int, 0, len(cfg.UpstreamServers))
 	capabilities := make([]serverCapabilities, 0, len(cfg.UpstreamServers))
 
 	for _, server := range cfg.UpstreamServers {
 		cl := client.New(server.URL, cfg.Server.Timeout, verbose)
 		clients = append(clients, cl)
 		serverURLs = append(serverURLs, server.URL)
+		serverPriorities = append(serverPriorities, server.Priority)
 
 		// Store capabilities (pointers default to nil if not set, but we set defaults in config.Load())
 		cap := serverCapabilities{
@@ -81,14 +84,15 @@ func New(cfg *config.Config, verbose bool) (*Manager, error) {
 		log.Printf("[DEBUG] Upstream manager initialized with %d servers, min_upload_servers=%d, strategy=%s",
 			len(serverURLs), cfg.Server.MinUploadServers, cfg.Server.RedirectStrategy)
 		for i, url := range serverURLs {
-			log.Printf("[DEBUG]   Upstream server %d: %s (mirror=%t, upload_head=%t)",
-				i+1, url, capabilities[i].SupportsMirror, capabilities[i].SupportsUploadHead)
+			log.Printf("[DEBUG]   Upstream server %d: %s (priority=%d, mirror=%t, upload_head=%t)",
+				i+1, url, serverPriorities[i], capabilities[i].SupportsMirror, capabilities[i].SupportsUploadHead)
 		}
 	}
 
 	return &Manager{
 		clients:            clients,
 		serverURLs:         serverURLs,
+		serverPriorities:   serverPriorities,
 		serverCapabilities: capabilities,
 		minUploadServers:   cfg.Server.MinUploadServers,
 		redirectStrategy:   cfg.Server.RedirectStrategy,
@@ -414,6 +418,8 @@ func (m *Manager) SelectServer(availableServers []UploadResultWithResponse) (*Up
 		selected = m.selectRoundRobinWithResponse(availableServers)
 	case "random":
 		selected = m.selectRandomWithResponse(availableServers)
+	case "priority":
+		selected = m.selectPriorityWithResponse(availableServers)
 	case "health_based":
 		// For now, fall back to round-robin
 		// Health checking can be added later
@@ -446,6 +452,39 @@ func (m *Manager) selectRandomWithResponse(availableServers []UploadResultWithRe
 	return selected
 }
 
+// selectPriorityWithResponse selects the server with the lowest priority number (lower is better)
+// If multiple servers have the same lowest priority, returns the first one found
+func (m *Manager) selectPriorityWithResponse(availableServers []UploadResultWithResponse) *UploadResultWithResponse {
+	if len(availableServers) == 0 {
+		return nil
+	}
+
+	// Find the priority for each available server
+	var bestServer *UploadResultWithResponse
+	bestPriority := int(^uint(0) >> 1) // Max int value
+
+	for i := range availableServers {
+		serverURL := availableServers[i].ServerURL
+		// Find the priority for this URL
+		for j, url := range m.serverURLs {
+			if url == serverURL {
+				if m.serverPriorities[j] < bestPriority {
+					bestPriority = m.serverPriorities[j]
+					bestServer = &availableServers[i]
+				}
+				break
+			}
+		}
+	}
+
+	// If we didn't find a match (shouldn't happen), fall back to first available
+	if bestServer == nil {
+		bestServer = &availableServers[0]
+	}
+
+	return bestServer
+}
+
 // SelectServer selects a server URL for redirect based on the configured strategy (legacy method for download)
 func (m *Manager) SelectServerURL(availableServers []string) (string, error) {
 	if len(availableServers) == 0 {
@@ -458,6 +497,12 @@ func (m *Manager) SelectServerURL(availableServers []string) (string, error) {
 		selected = m.selectRoundRobin(availableServers)
 	case "random":
 		selected = m.selectRandom(availableServers)
+	case "priority":
+		selected = m.selectPriority(availableServers)
+	case "local":
+		// For download redirects, "local" strategy uses round-robin to select upstream server
+		// "Local" only affects response URLs in upload/mirror/list endpoints
+		selected = m.selectRoundRobin(availableServers)
 	case "health_based":
 		// For now, fall back to round-robin
 		// Health checking can be added later
@@ -487,6 +532,46 @@ func (m *Manager) selectRoundRobin(availableServers []string) string {
 // selectRandom selects a random server (legacy for downloads)
 func (m *Manager) selectRandom(availableServers []string) string {
 	return availableServers[rand.Intn(len(availableServers))]
+}
+
+// selectPriority selects the server with the lowest priority number (lower is better)
+// If multiple servers have the same lowest priority, returns the first one found
+func (m *Manager) selectPriority(availableServers []string) string {
+	if len(availableServers) == 0 {
+		return ""
+	}
+
+	// Create a map of available server URLs to their priorities
+	availablePriorities := make(map[string]int)
+	for _, availableURL := range availableServers {
+		// Find the priority for this URL
+		for i, url := range m.serverURLs {
+			if url == availableURL {
+				availablePriorities[availableURL] = m.serverPriorities[i]
+				break
+			}
+		}
+	}
+
+	// Find the server with the lowest priority
+	var bestServer string
+	bestPriority := int(^uint(0) >> 1) // Max int value
+
+	for _, url := range availableServers {
+		if priority, ok := availablePriorities[url]; ok {
+			if priority < bestPriority {
+				bestPriority = priority
+				bestServer = url
+			}
+		}
+	}
+
+	// If we didn't find a match (shouldn't happen), fall back to first available
+	if bestServer == "" {
+		bestServer = availableServers[0]
+	}
+
+	return bestServer
 }
 
 // GetClient returns a client for a specific server URL

@@ -2,15 +2,15 @@
 # One-liner helper: Upload a file using curl with proper auth
 # Usage: ./scripts/upload_file.sh <file_path> [server_url]
 # Example: ./scripts/upload_file.sh bitcoin.pdf
-# Example: ./scripts/upload_file.sh image.png http://localhost:8080
+# Example: ./scripts/upload_file.sh image.png http://localhost:7624
 
 FILE_PATH="${1:-}"
-SERVER_URL="${2:-http://localhost:8080}"
+SERVER_URL="${2:-http://localhost:7624}"
 
 if [ -z "$FILE_PATH" ]; then
     echo "Usage: $0 <file_path> [server_url]"
     echo "Example: $0 bitcoin.pdf"
-    echo "Example: $0 image.png http://localhost:8080"
+    echo "Example: $0 image.png http://localhost:7624"
     exit 1
 fi
 

@@ -12,6 +12,6 @@ fi
 
 TMPFILE=$(mktemp)
 echo "{\"url\":\"$URL\"}" > "$TMPFILE"
-HEADER=$(./scripts/gen_auth_header.sh PUT "http://localhost:8080/mirror" "$TMPFILE")
-curl -s -X PUT -H "$HEADER" -H "Content-Type: application/json" -d @"$TMPFILE" http://localhost:8080/mirror | jq '.'
+HEADER=$(./scripts/gen_auth_header.sh PUT "http://localhost:7624/mirror" "$TMPFILE")
+curl -s -X PUT -H "$HEADER" -H "Content-Type: application/json" -d @"$TMPFILE" http://localhost:7624/mirror | jq '.'
 rm -f "$TMPFILE"

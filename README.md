@@ -7,14 +7,15 @@ A media server proxy for the Blossom protocol (used by Nostr clients) that forwa
 - **Redundancy**: Forwards uploads to multiple upstream Blossom servers simultaneously
 - **Load Distribution**: Distributes download requests across healthy upstream servers
 - **Health Monitoring**: Tracks server health and marks unhealthy servers after consecutive failures
-- **Statistics**: Aggregates statistics from all upstream servers
+- **System Resource Monitoring**: Monitors memory usage and goroutine counts with configurable limits
+- **Statistics**: Aggregates statistics from all upstream servers with per-server operation counts
 - **Unified API**: Single endpoint for multiple upstream Blossom servers
 - **All Blossom Endpoints**: Supports upload, download, list, delete, mirror, and preflight checks
 - **BUD-08 & NIP-94**: Returns proper tags with `nip94` array including URL tags and NIP-94 metadata
 - **Minimal Cache**: In-memory cache for hash-to-server mappings
 - **Thread-safe Operations**: Safe for concurrent requests
-- **Web Dashboard**: Built-in home page with health status and statistics
-- **Docker Support**: Ready-to-use Dockerfile and docker-compose configuration
+- **Web Dashboard**: Built-in home page with health status, statistics, memory, and goroutine monitoring
+- **Docker Support**: Ready-to-use Dockerfile and docker-compose configuration with autoheal
 
 ## Architecture
 
@@ -37,24 +38,79 @@ go build -o blossom_espelhator ./cmd/server
 
 ### Docker
 
-The project includes Docker support:
+The project includes Docker support with docker-compose for easy deployment.
 
-```bash
-# Build and run with docker-compose
-docker-compose -f docker-compose.prod.yml up -d
+#### Prerequisites
 
-# View logs
-docker-compose -f docker-compose.prod.yml logs -f
+- Docker and Docker Compose installed
+- Configuration file created at `config/config.yaml` (copy from `config.example.yaml`)
 
-# Stop
-docker-compose -f docker-compose.prod.yml down
+#### Running with Docker Compose
+
+1. **Create configuration file**:
+   ```bash
+   cp config/config.example.yaml config/config.yaml
+   # Edit config/config.yaml with your upstream servers
+   ```
+
+2. **Start the services**:
+   ```bash
+   docker-compose -f docker-compose.prod.yml up -d
+   ```
+
+   This starts:
+   - **blossom-espelhator**: The proxy server (accessible on port `7624`)
+   - **autoheal**: Monitors the proxy container and restarts it if unhealthy
+
+3. **View logs**:
+   ```bash
+   # All services
+   docker-compose -f docker-compose.prod.yml logs -f
+   
+   # Proxy only
+   docker-compose -f docker-compose.prod.yml logs -f blossom-espelhator
+   ```
+
+4. **Check status**:
+   ```bash
+   docker-compose -f docker-compose.prod.yml ps
+   ```
+
+5. **Stop services**:
+   ```bash
+   docker-compose -f docker-compose.prod.yml down
+   ```
+
+#### Docker Setup Features
+
+- **Multi-stage build**: Optimized Alpine-based image for small size
+- **Health checks**: Built-in health checks using `/health` endpoint
+- **Autoheal**: Automatically restarts container if health checks fail
+- **Verbose logging**: Runs with `-v` flag enabled by default for debugging
+- **Project-specific labels**: Uses `blossom.espelhator.autoheal=true` to avoid conflicts
+- **Read-only config mount**: Configuration file is mounted read-only for security
+- **Non-root user**: Container runs as unprivileged `appuser`
+
+#### Custom Port
+
+The default host port is `7624` (maps to container port `8080`). To change it, edit `docker-compose.prod.yml`:
+
+```yaml
+ports:
+  - "YOUR_PORT:7624"  # Change YOUR_PORT to desired host port
 ```
 
-The Docker setup includes:
-- Multi-stage build for small image size
-- Health checks with autoheal support
-- Project-specific labels for container management
-- Read-only config mount
+#### Autoheal Configuration
+
+The autoheal service monitors the proxy container and restarts it if it becomes unhealthy. To configure webhooks or adjust settings, edit the `autoheal` service in `docker-compose.prod.yml`:
+
+```yaml
+autoheal:
+  environment:
+    - AUTOHEAL_INTERVAL=5           # Check interval in seconds
+    - CURL_TIMEOUT=30               # Timeout for health checks
+    # - WEBHOOK_URL=https://...     # Optional: webhook URL for events
+```
 
 ## Configuration
 
@@ -85,7 +141,13 @@ server:
   redirect_strategy: "round_robin" # Download server selection: "round_robin", "random", "health_based"
   timeout: 30s                     # Timeout for upstream requests
   max_retries: 3                   # Maximum retries for failed requests
+  
+  # Health monitoring configuration
   max_failures: 5                  # Consecutive failures before marking server unhealthy
+  
+  # System resource limits for health checks
+  max_goroutines: 1000             # Maximum allowed goroutines before marking system unhealthy
+  max_memory_bytes: 536870912      # Maximum memory usage in bytes (512 MB) before marking system unhealthy
 ```
 
 ### Server Capabilities
@@ -114,18 +176,61 @@ server:
 ### Web Dashboard
 
 - **GET /** - Home page with health status, statistics, and documentation
+  - Displays overall system health status
+  - Shows healthy server count vs. minimum required
+  - Displays memory usage (MB) vs. maximum limit with health indicator
+  - Displays goroutine count vs. maximum limit with health indicator
+  - Shows aggregated operation statistics (uploads, downloads, mirrors, deletes, lists)
+  - Lists all upstream servers with per-server statistics and health status
+  - Includes API documentation and usage examples
 
 ### Health & Statistics
 
 - **GET /health** - Health check endpoint (returns JSON)
-  - Returns `200 OK` if system is healthy (enough healthy servers)
+  - Returns `200 OK` if system is healthy (enough healthy servers, within memory/goroutine limits)
   - Returns `503 Service Unavailable` if system is unhealthy
-  - Includes per-server health status and consecutive failures
+  - Checks:
+    - Server health: At least `min_upload_servers` upstream servers are healthy
+    - Memory usage: Current memory usage is below `max_memory_bytes`
+    - Goroutines: Current goroutine count is below `max_goroutines`
+  - Response includes:
+    - Overall health status
+    - Healthy server count vs. minimum required
+    - Memory usage (bytes) vs. maximum limit
+    - Goroutine count vs. maximum limit
+    - Per-server health status and consecutive failures
+
+  Example response:
+  ```json
+  {
+    "healthy": true,
+    "healthy_count": 3,
+    "min_upload_servers": 2,
+    "memory": {
+      "bytes": 16777216,
+      "max": 536870912,
+      "healthy": true
+    },
+    "goroutines": {
+      "count": 42,
+      "max": 1000,
+      "healthy": true
+    },
+    "servers": {
+      "https://server1.com": {
+        "healthy": true,
+        "consecutive_failures": 0
+      }
+    }
+  }
+  ```
 
 - **GET /stats** - Statistics endpoint (returns JSON)
   - Aggregated statistics from all upstream servers
   - Per-server operation counts (uploads, downloads, mirrors, deletes, lists)
   - Success/failure counts and consecutive failures
+  - System metrics: current memory usage and goroutine count
+  - Last success/failure timestamps per server
 
 ### Blossom Protocol Endpoints
 
@@ -186,25 +291,88 @@ All endpoints that return blob metadata include a `nip94` array with tags:
 
 ## Health Monitoring
 
-The proxy tracks health for each upstream server:
+The proxy tracks health at multiple levels:
+
+### Upstream Server Health
 
 - **Consecutive Failures**: Counts consecutive operation failures per server
-- **Unhealthy Threshold**: Server marked unhealthy when failures exceed `max_failures`
+- **Unhealthy Threshold**: Server marked unhealthy when failures exceed `max_failures` (default: 5)
 - **Auto Recovery**: Failures reset to 0 on successful operation
-- **System Health**: System is unhealthy if fewer than `min_upload_servers` are healthy
+- **Startup State**: All servers start as healthy and only become unhealthy after failures
+
+### System Health
+
+The system is considered healthy when **all** of the following conditions are met:
+
+1. **Server Health**: At least `min_upload_servers` upstream servers are healthy
+2. **Memory Usage**: Current memory allocation is below `max_memory_bytes` (default: 512 MB)
+3. **Goroutines**: Current goroutine count is below `max_goroutines` (default: 1000)
+
+The `/health` endpoint checks all three conditions and returns `200 OK` only if all pass. If any check fails, it returns `503 Service Unavailable`.
+
+### Monitoring
+
+- **Homepage**: Displays memory and goroutine usage with health indicators
+- **Health Endpoint**: JSON response includes memory/goroutine metrics and health status
+- **Stats Endpoint**: Includes current memory and goroutine counts in the response
 
 ## Statistics
 
-The `/stats` endpoint provides:
+The `/stats` endpoint provides comprehensive statistics:
 
 - **Per-server statistics**:
   - Operation counts (uploads, downloads, mirrors, deletes, lists)
-  - Success/failure counts
+  - Success/failure counts for each operation type
   - Consecutive failures
   - Health status
   - Last success/failure timestamps
 
 - **Aggregated totals**: Sum of all operations across all servers
+
+- **System metrics**:
+  - Current memory usage (bytes) and maximum limit
+  - Current goroutine count and maximum limit
+
+Example response:
+```json
+{
+  "servers": {
+    "https://server1.com": {
+      "url": "https://server1.com",
+      "uploads_success": 150,
+      "uploads_failure": 2,
+      "downloads": 1250,
+      "mirrors_success": 10,
+      "mirrors_failure": 0,
+      "deletes_success": 5,
+      "deletes_failure": 0,
+      "lists_success": 200,
+      "lists_failure": 1,
+      "consecutive_failures": 0,
+      "is_healthy": true
+    }
+  },
+  "totals": {
+    "uploads_success": 450,
+    "uploads_failure": 5,
+    "downloads": 3750,
+    "mirrors_success": 30,
+    "mirrors_failure": 0,
+    "deletes_success": 15,
+    "deletes_failure": 0,
+    "lists_success": 600,
+    "lists_failure": 3
+  },
+  "memory": {
+    "bytes": 25165824,
+    "max": 536870912
+  },
+  "goroutines": {
+    "count": 45,
+    "max": 1000
+  }
+}
+```
 
 ## Usage with Nostr Clients
 

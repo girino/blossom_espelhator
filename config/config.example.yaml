@@ -25,7 +25,13 @@ server:
   min_upload_servers: 2
   
   # Strategy for selecting which upstream server to redirect to for downloads
-  # Options: "round_robin", "random", "health_based"
+  # Options: "round_robin", "random", "health_based", "priority", "local"
+  # - "round_robin": Cycles through available servers
+  # - "random": Randomly selects from available servers
+  # - "health_based": Uses round-robin (health checking not yet implemented)
+  # - "priority": Selects server with lowest priority number (lower is better)
+  # - "local": Returns local URL (base_url/sha256.ext) where base_url is derived from request
+  #            and ext is derived from mime type or file extension
   redirect_strategy: "round_robin"
   
   # Timeout for upstream server requests

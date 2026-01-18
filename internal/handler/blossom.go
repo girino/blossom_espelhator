@@ -18,6 +18,97 @@ import (
 	"github.com/girino/blossom_espelhator/internal/upstream"
 )
 
+// mimeTypeToExtension maps common mime types to file extensions
+func mimeTypeToExtension(mimeType string) string {
+	// Remove charset/parameters if present (e.g., "text/html; charset=utf-8")
+	parts := strings.Split(mimeType, ";")
+	mimeType = strings.TrimSpace(parts[0])
+
+	mimeMap := map[string]string{
+		"image/png":                ".png",
+		"image/jpeg":               ".jpg",
+		"image/jpg":                ".jpg",
+		"image/gif":                ".gif",
+		"image/webp":               ".webp",
+		"image/svg+xml":            ".svg",
+		"image/bmp":                ".bmp",
+		"image/x-icon":             ".ico",
+		"image/vnd.microsoft.icon": ".ico",
+		"application/pdf":          ".pdf",
+		"application/json":         ".json",
+		"text/plain":               ".txt",
+		"text/html":                ".html",
+		"text/css":                 ".css",
+		"text/javascript":          ".js",
+		"application/javascript":   ".js",
+		"application/xml":          ".xml",
+		"text/xml":                 ".xml",
+		"video/mp4":                ".mp4",
+		"video/webm":               ".webm",
+		"video/ogg":                ".ogv",
+		"audio/mpeg":               ".mp3",
+		"audio/ogg":                ".oga",
+		"audio/wav":                ".wav",
+		"audio/webm":               ".weba",
+		"application/zip":          ".zip",
+		"application/x-tar":        ".tar",
+		"application/gzip":         ".gz",
+	}
+
+	if ext, ok := mimeMap[strings.ToLower(mimeType)]; ok {
+		return ext
+	}
+	return ""
+}
+
+// constructLocalURL constructs a local URL in the format baseurl/sha256.ext
+// Base URL is always derived from the request (scheme + host)
+// Extracts extension from: 1) URL path if available, 2) mime type, 3) none if neither available
+func (h *BlossomHandler) constructLocalURL(hash string, mimeType string, r *http.Request) string {
+	// Derive base URL from request
+	scheme := "http"
+	if r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https" {
+		scheme = "https"
+	}
+	host := r.Host
+	if host == "" {
+		host = "localhost"
+		if h.config.Server.ListenAddr != "" {
+			addr := strings.TrimPrefix(h.config.Server.ListenAddr, ":")
+			host = fmt.Sprintf("localhost:%s", addr)
+		}
+	}
+	baseURL := fmt.Sprintf("%s://%s", scheme, host)
+
+	// Try to get extension from URL path first (e.g., /abc123.png)
+	ext := ""
+	if r != nil {
+		path := r.URL.Path
+		// Check if path has extension after hash
+		if strings.Contains(path, ".") {
+			parts := strings.Split(path, ".")
+			if len(parts) > 1 {
+				potentialExt := "." + parts[len(parts)-1]
+				// Validate it's a reasonable extension (just check it's not too long)
+				if len(potentialExt) <= 10 { // Most extensions are 3-4 chars, 10 is safe
+					ext = potentialExt
+				}
+			}
+		}
+	}
+
+	// If no extension from path, try mime type
+	if ext == "" && mimeType != "" {
+		ext = mimeTypeToExtension(mimeType)
+	}
+
+	// Construct URL
+	if ext != "" {
+		return fmt.Sprintf("%s/%s%s", baseURL, hash, ext)
+	}
+	return fmt.Sprintf("%s/%s", baseURL, hash)
+}
+
 // BlossomHandler handles Blossom protocol requests
 type BlossomHandler struct {
 	upstreamManager *upstream.Manager
@@ -264,6 +355,15 @@ func (h *BlossomHandler) HandleUpload(w http.ResponseWriter, r *http.Request) {
 	// Update nip94 in response
 	responseData["nip94"] = tags
 
+	// If redirect strategy is "local", set the response URL to local URL
+	if h.config.Server.RedirectStrategy == "local" {
+		localURL := h.constructLocalURL(hashStr, contentType, r)
+		responseData["url"] = localURL
+		if h.verbose {
+			log.Printf("[DEBUG] HandleUpload: using local URL for response: %s", localURL)
+		}
+	}
+
 	if h.verbose {
 		// Count url tags for logging
 		urlTagCount := 0
@@ -492,6 +592,25 @@ func (h *BlossomHandler) HandleMirror(w http.ResponseWriter, r *http.Request) {
 	// Update nip94 in response
 	responseData["nip94"] = tags
 
+	// If redirect strategy is "local", set the response URL to local URL
+	if h.config.Server.RedirectStrategy == "local" {
+		// Get hash from response
+		var hashVal string
+		if hashStr, ok := responseData["hash"].(string); ok && hashStr != "" {
+			hashVal = hashStr
+		} else if sha256Val, ok := responseData["sha256"].(string); ok && sha256Val != "" {
+			hashVal = sha256Val
+		}
+
+		if hashVal != "" {
+			localURL := h.constructLocalURL(hashVal, mimeType, r)
+			responseData["url"] = localURL
+			if h.verbose {
+				log.Printf("[DEBUG] HandleMirror: using local URL for response: %s", localURL)
+			}
+		}
+	}
+
 	if h.verbose {
 		// Count url tags for logging
 		urlTagCount := 0
@@ -677,7 +796,9 @@ func (h *BlossomHandler) HandleDownload(w http.ResponseWriter, r *http.Request) 
 	// Track download success for the selected server
 	h.stats.RecordSuccess(selectedServer, "download")
 
-	// Redirect to the selected server
+	// Always redirect to upstream server (not local)
+	// "local" strategy only affects response URLs in upload/mirror/list, not download redirects
+	// When "local" is set, we still use round-robin to select an upstream server for redirects
 	redirectURL := fmt.Sprintf("%s/%s", selectedServer, hash)
 
 	if h.verbose {
@@ -860,6 +981,35 @@ func (h *BlossomHandler) HandleList(w http.ResponseWriter, r *http.Request) {
 
 	if h.verbose {
 		log.Printf("[DEBUG] HandleList: merged %d items from all servers", len(mergedResults))
+	}
+
+	// If redirect strategy is "local", replace URLs with local URLs
+	if h.config.Server.RedirectStrategy == "local" {
+		for _, item := range mergedResults {
+			// Get hash from item
+			var hashVal string
+			if hashStr, ok := item["hash"].(string); ok && hashStr != "" {
+				hashVal = hashStr
+			} else if sha256Val, ok := item["sha256"].(string); ok && sha256Val != "" {
+				hashVal = sha256Val
+			}
+
+			if hashVal != "" {
+				// Get mime type from item
+				var mimeType string
+				if typeVal, ok := item["type"].(string); ok && typeVal != "" {
+					mimeType = typeVal
+				}
+
+				// Construct local URL (use request for path extension detection)
+				localURL := h.constructLocalURL(hashVal, mimeType, r)
+				item["url"] = localURL
+
+				if h.verbose {
+					log.Printf("[DEBUG] HandleList: replaced URL with local URL for hash %s: %s", hashVal, localURL)
+				}
+			}
+		}
 	}
 
 	// Marshal the merged results to JSON
