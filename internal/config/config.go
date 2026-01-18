@@ -34,6 +34,9 @@ type ServerConfig struct {
 	RedirectStrategy string        `yaml:"redirect_strategy"`
 	Timeout          time.Duration `yaml:"timeout"`
 	MaxRetries       int           `yaml:"max_retries"`
+
+	// Health check configuration
+	MaxFailures int `yaml:"max_failures"` // Maximum consecutive failures before marking server unhealthy
 }
 
 // Load reads and parses the configuration file
@@ -63,6 +66,9 @@ func Load(path string) (*Config, error) {
 	}
 	if config.Server.MaxRetries == 0 {
 		config.Server.MaxRetries = 3
+	}
+	if config.Server.MaxFailures == 0 {
+		config.Server.MaxFailures = 5 // Default: 5 consecutive failures before unhealthy
 	}
 
 	// Set default capabilities for upstream servers (default to false for optional endpoints)

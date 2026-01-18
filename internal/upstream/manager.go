@@ -983,3 +983,193 @@ func (m *Manager) ListParallel(ctx context.Context, pubkey string) ([]map[string
 
 	return merged, nil
 }
+
+// ListResult represents a single server's list query result
+type ListResult struct {
+	ServerURL string
+	Data      []map[string]interface{}
+	Error     error
+}
+
+// ListParallelWithResults queries all upstream servers and returns both merged results and per-server results
+// This is a wrapper around ListParallel that also returns individual server results for stats tracking
+func (m *Manager) ListParallelWithResults(ctx context.Context, pubkey string) ([]map[string]interface{}, []ListResult, error) {
+	// Use the existing ListParallel implementation and extract per-server results
+	// We'll call ListParallel but need to capture the results, so we duplicate the logic
+
+	// Channel to collect results
+	resultChan := make(chan struct {
+		ServerURL string
+		Data      []map[string]interface{}
+		Error     error
+	}, len(m.clients))
+
+	// Launch parallel list queries
+	var wg sync.WaitGroup
+	for i, cl := range m.clients {
+		wg.Add(1)
+		go func(idx int, c *client.Client, url string) {
+			defer wg.Done()
+
+			if m.verbose {
+				log.Printf("[DEBUG] ListParallel: querying server %d: %s", idx+1, url)
+			}
+
+			response, err := c.List(ctx, pubkey)
+			if err != nil {
+				resultChan <- struct {
+					ServerURL string
+					Data      []map[string]interface{}
+					Error     error
+				}{
+					ServerURL: url,
+					Data:      nil,
+					Error:     err,
+				}
+				return
+			}
+
+			// Parse JSON response
+			var data []map[string]interface{}
+			if err := json.Unmarshal(response, &data); err != nil {
+				resultChan <- struct {
+					ServerURL string
+					Data      []map[string]interface{}
+					Error     error
+				}{
+					ServerURL: url,
+					Data:      nil,
+					Error:     fmt.Errorf("failed to parse JSON: %w", err),
+				}
+				return
+			}
+
+			resultChan <- struct {
+				ServerURL string
+				Data      []map[string]interface{}
+				Error     error
+			}{
+				ServerURL: url,
+				Data:      data,
+				Error:     nil,
+			}
+		}(i, cl, m.serverURLs[i])
+	}
+
+	wg.Wait()
+	close(resultChan)
+
+	// Collect results
+	allResults := make([]ListResult, 0)
+	for result := range resultChan {
+		allResults = append(allResults, ListResult{
+			ServerURL: result.ServerURL,
+			Data:      result.Data,
+			Error:     result.Error,
+		})
+	}
+
+	// Merge and deduplicate (reuse logic from ListParallel)
+	type itemWithServer struct {
+		Item      map[string]interface{}
+		ServerURL string
+	}
+	itemsByHash := make(map[string][]itemWithServer)
+	for _, result := range allResults {
+		if result.Error != nil {
+			continue
+		}
+		for _, item := range result.Data {
+			sha256Val, ok := item["sha256"].(string)
+			if !ok || sha256Val == "" {
+				continue
+			}
+			itemsByHash[sha256Val] = append(itemsByHash[sha256Val], itemWithServer{
+				Item:      item,
+				ServerURL: result.ServerURL,
+			})
+		}
+	}
+
+	// Build merged results (simplified - reuse full logic if needed)
+	merged := make([]map[string]interface{}, 0, len(itemsByHash))
+	for sha256Val, items := range itemsByHash {
+		var selected map[string]interface{}
+		if len(items) == 1 {
+			selected = items[0].Item
+		} else {
+			serverURLs := make([]string, len(items))
+			for i, item := range items {
+				serverURLs[i] = item.ServerURL
+			}
+			selectedServerURL, _ := m.SelectServerURL(serverURLs)
+			for _, item := range items {
+				if item.ServerURL == selectedServerURL {
+					selected = item.Item
+					break
+				}
+			}
+			if selected == nil {
+				selected = items[0].Item
+			}
+		}
+
+		// Add nip94 tags (reuse from ListParallel)
+		resultItem := make(map[string]interface{})
+		for k, v := range selected {
+			resultItem[k] = v
+		}
+
+		// Get existing tags
+		var tags []interface{}
+		if existingTags, ok := selected["nip94"].([]interface{}); ok {
+			tags = make([]interface{}, 0, len(existingTags))
+			for _, tag := range existingTags {
+				if tagArray, ok := tag.([]interface{}); ok && len(tagArray) > 0 {
+					tags = append(tags, tagArray)
+				}
+			}
+		} else {
+			tags = make([]interface{}, 0)
+		}
+
+		// Add url tags from all servers
+		urlTagMap := make(map[string]bool)
+		for _, item := range items {
+			if urlVal, ok := item.Item["url"].(string); ok && urlVal != "" {
+				if !urlTagMap[urlVal] {
+					urlTagMap[urlVal] = true
+					tags = append(tags, []interface{}{"url", urlVal})
+				}
+			}
+		}
+
+		// Add x and m tags if not present
+		hasX, hasM := false, false
+		for _, tag := range tags {
+			if tagArray, ok := tag.([]interface{}); ok && len(tagArray) > 0 {
+				if typeVal, ok := tagArray[0].(string); ok {
+					if typeVal == "x" {
+						hasX = true
+					}
+					if typeVal == "m" {
+						hasM = true
+					}
+				}
+			}
+		}
+		if !hasX && sha256Val != "" {
+			tags = append(tags, []interface{}{"x", sha256Val})
+		}
+		if !hasM {
+			if typeVal, ok := selected["type"].(string); ok && typeVal != "" {
+				tags = append(tags, []interface{}{"m", typeVal})
+			}
+		}
+
+		resultItem["nip94"] = tags
+		merged = append(merged, resultItem)
+	}
+
+	return merged, allResults, nil
+}

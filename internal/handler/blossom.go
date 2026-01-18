@@ -12,6 +12,8 @@ import (
 	"strings"
 
 	"github.com/girino/blossom_espelhator/internal/cache"
+	"github.com/girino/blossom_espelhator/internal/config"
+	"github.com/girino/blossom_espelhator/internal/stats"
 	"github.com/girino/blossom_espelhator/internal/upstream"
 )
 
@@ -19,14 +21,18 @@ import (
 type BlossomHandler struct {
 	upstreamManager *upstream.Manager
 	cache           *cache.Cache
+	stats           *stats.Stats
+	config          *config.Config
 	verbose         bool
 }
 
 // New creates a new Blossom handler
-func New(upstreamManager *upstream.Manager, cache *cache.Cache, verbose bool) *BlossomHandler {
+func New(upstreamManager *upstream.Manager, cache *cache.Cache, statsTracker *stats.Stats, cfg *config.Config, verbose bool) *BlossomHandler {
 	return &BlossomHandler{
 		upstreamManager: upstreamManager,
 		cache:           cache,
+		stats:           statsTracker,
+		config:          cfg,
 		verbose:         verbose,
 	}
 }
@@ -96,6 +102,22 @@ func (h *BlossomHandler) HandleUpload(w http.ResponseWriter, r *http.Request) {
 	// Forward upload to upstream servers
 	bodyReader := bytes.NewReader(bodyBytes)
 	successfulServers, err := h.upstreamManager.UploadParallel(r.Context(), bodyReader, r.Header.Get("Content-Type"), headers)
+
+	// Track stats for all attempted servers (successful and failed)
+	// Get all upstream server URLs to track failures
+	allServerURLs := h.upstreamManager.GetServerURLs()
+	successfulURLs := make(map[string]bool)
+	for _, srv := range successfulServers {
+		successfulURLs[srv.ServerURL] = true
+		h.stats.RecordSuccess(srv.ServerURL, "upload")
+	}
+	// Track failures for servers that didn't succeed
+	for _, serverURL := range allServerURLs {
+		if !successfulURLs[serverURL] {
+			h.stats.RecordFailure(serverURL, "upload")
+		}
+	}
+
 	if err != nil {
 		if h.verbose {
 			log.Printf("[DEBUG] HandleUpload: upload failed: %v", err)
@@ -322,6 +344,17 @@ func (h *BlossomHandler) HandleMirror(w http.ResponseWriter, r *http.Request) {
 	// Forward mirror request to upstream servers
 	bodyReader := bytes.NewReader(bodyBytes)
 	successfulServers, err := h.upstreamManager.MirrorParallel(r.Context(), bodyReader, r.Header.Get("Content-Type"), headers)
+
+	// Track stats for mirror operations
+	successfulURLs := make(map[string]bool)
+	for _, srv := range successfulServers {
+		successfulURLs[srv.ServerURL] = true
+		h.stats.RecordSuccess(srv.ServerURL, "mirror")
+	}
+	// Track failures for mirror-capable servers that didn't succeed
+	// Note: Only track failures for servers that actually attempted the mirror
+	// MirrorParallel only attempts servers with mirror capability, so we can't track all servers here
+
 	if err != nil {
 		if h.verbose {
 			log.Printf("[DEBUG] HandleMirror: mirror request failed: %v", err)
@@ -640,6 +673,9 @@ func (h *BlossomHandler) HandleDownload(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	// Track download success for the selected server
+	h.stats.RecordSuccess(selectedServer, "download")
+
 	// Redirect to the selected server
 	redirectURL := fmt.Sprintf("%s/%s", selectedServer, hash)
 
@@ -791,13 +827,34 @@ func (h *BlossomHandler) HandleList(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Query all upstream servers in parallel and merge results
-	mergedResults, err := h.upstreamManager.ListParallel(r.Context(), path)
+	mergedResults, listResults, err := h.upstreamManager.ListParallelWithResults(r.Context(), path)
 	if err != nil {
 		if h.verbose {
 			log.Printf("[DEBUG] HandleList: list request failed: %v", err)
 		}
+		// Track failures for all servers if operation failed completely
+		if listResults != nil {
+			for _, result := range listResults {
+				if result.Error != nil {
+					h.stats.RecordFailure(result.ServerURL, "list")
+				} else {
+					h.stats.RecordSuccess(result.ServerURL, "list")
+				}
+			}
+		}
 		http.Error(w, fmt.Sprintf("List request failed: %v", err), http.StatusInternalServerError)
 		return
+	}
+
+	// Track stats for all servers based on their individual results
+	if listResults != nil {
+		for _, result := range listResults {
+			if result.Error != nil {
+				h.stats.RecordFailure(result.ServerURL, "list")
+			} else {
+				h.stats.RecordSuccess(result.ServerURL, "list")
+			}
+		}
 	}
 
 	if h.verbose {
@@ -899,10 +956,12 @@ func (h *BlossomHandler) HandleDelete(w http.ResponseWriter, r *http.Request) {
 		err = cl.Delete(r.Context(), hash, headers)
 		if err == nil {
 			successCount++
+			h.stats.RecordSuccess(serverURL, "delete")
 			if h.verbose {
 				log.Printf("[DEBUG] HandleDelete: successfully deleted from %s", serverURL)
 			}
 		} else {
+			h.stats.RecordFailure(serverURL, "delete")
 			if h.verbose {
 				log.Printf("[DEBUG] HandleDelete: failed to delete from %s: %v", serverURL, err)
 			}
@@ -926,4 +985,97 @@ func (h *BlossomHandler) HandleDelete(w http.ResponseWriter, r *http.Request) {
 		}
 		http.Error(w, "Delete failed on all servers", http.StatusInternalServerError)
 	}
+}
+
+// HandleHealth handles GET /health requests
+// Returns 200 OK if system is healthy, 503 Service Unavailable if unhealthy
+func (h *BlossomHandler) HandleHealth(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	healthyCount := h.stats.GetHealthyCount()
+	minUploadServers := h.config.Server.MinUploadServers
+
+	allStats := h.stats.GetAll()
+
+	response := map[string]interface{}{
+		"healthy":            healthyCount >= minUploadServers,
+		"healthy_count":      healthyCount,
+		"min_upload_servers": minUploadServers,
+		"servers":            make(map[string]interface{}),
+	}
+
+	// Add server health details
+	serversMap := response["servers"].(map[string]interface{})
+	for url, stats := range allStats {
+		serversMap[url] = map[string]interface{}{
+			"healthy":              stats.IsHealthy,
+			"consecutive_failures": stats.ConsecutiveFailures,
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	if healthyCount >= minUploadServers {
+		w.WriteHeader(http.StatusOK)
+	} else {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}
+
+	json.NewEncoder(w).Encode(response)
+}
+
+// HandleStats handles GET /stats requests
+// Returns detailed statistics for all operations aggregated by upstream server
+func (h *BlossomHandler) HandleStats(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	allStats := h.stats.GetAll()
+
+	response := map[string]interface{}{
+		"servers": allStats,
+	}
+
+	// Calculate totals
+	var totalUploadsSuccess, totalUploadsFailure int64
+	var totalDownloads int64
+	var totalMirrorsSuccess, totalMirrorsFailure int64
+	var totalDeletesSuccess, totalDeletesFailure int64
+	var totalListsSuccess, totalListsFailure int64
+
+	for _, stats := range allStats {
+		totalUploadsSuccess += stats.UploadsSuccess
+		totalUploadsFailure += stats.UploadsFailure
+		totalDownloads += stats.Downloads
+		totalMirrorsSuccess += stats.MirrorsSuccess
+		totalMirrorsFailure += stats.MirrorsFailure
+		totalDeletesSuccess += stats.DeletesSuccess
+		totalDeletesFailure += stats.DeletesFailure
+		totalListsSuccess += stats.ListsSuccess
+		totalListsFailure += stats.ListsFailure
+	}
+
+	response["totals"] = map[string]interface{}{
+		"uploads_success": totalUploadsSuccess,
+		"uploads_failure": totalUploadsFailure,
+		"downloads":       totalDownloads,
+		"mirrors_success": totalMirrorsSuccess,
+		"mirrors_failure": totalMirrorsFailure,
+		"deletes_success": totalDeletesSuccess,
+		"deletes_failure": totalDeletesFailure,
+		"lists_success":   totalListsSuccess,
+		"lists_failure":   totalListsFailure,
+	}
+
+	healthyCount := h.stats.GetHealthyCount()
+	response["healthy_count"] = healthyCount
+	response["total_servers"] = len(allStats)
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(response)
 }

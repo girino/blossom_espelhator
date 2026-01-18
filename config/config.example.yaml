@@ -33,3 +33,8 @@ server:
   
   # Maximum number of retries for failed requests
   max_retries: 3
+  
+  # Health check configuration
+  # Maximum consecutive failures before marking a server as unhealthy
+  # If a server exceeds this threshold, it is marked unhealthy
+  max_failures: 5

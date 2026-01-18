@@ -12,6 +12,7 @@ import (
 	"github.com/girino/blossom_espelhator/internal/cache"
 	"github.com/girino/blossom_espelhator/internal/config"
 	"github.com/girino/blossom_espelhator/internal/handler"
+	"github.com/girino/blossom_espelhator/internal/stats"
 	"github.com/girino/blossom_espelhator/internal/upstream"
 )
 
@@ -30,6 +31,9 @@ func main() {
 	// Initialize cache
 	cache := cache.New()
 
+	// Initialize stats tracker
+	statsTracker := stats.New(cfg.Server.MaxFailures)
+
 	// Initialize upstream manager
 	upstreamManager, err := upstream.New(cfg, *verbose)
 	if err != nil {
@@ -37,10 +41,16 @@ func main() {
 	}
 
 	// Initialize handler
-	blossomHandler := handler.New(upstreamManager, cache, *verbose)
+	blossomHandler := handler.New(upstreamManager, cache, statsTracker, cfg, *verbose)
 
 	// Setup routes
 	mux := http.NewServeMux()
+
+	// Health check endpoint
+	mux.HandleFunc("/health", blossomHandler.HandleHealth)
+
+	// Stats endpoint
+	mux.HandleFunc("/stats", blossomHandler.HandleStats)
 
 	// Upload endpoint
 	mux.HandleFunc("/upload", blossomHandler.HandleUpload)
