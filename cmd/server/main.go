@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"github.com/girino/blossom_espelhator/internal/cache"
@@ -84,13 +85,21 @@ func main() {
 
 		// Extract hash - take first 64 characters (hash may be followed by file extension)
 		var hash string
+		var extension string
 		if len(hashPath) >= 64 {
 			// Check if first 64 characters are valid hex
 			hashCandidate := hashPath[:64]
-			// Simple check: if all characters after position 64 are not hex, it's likely an extension
+			// Check if there's an extension after the hash (dot after position 64)
 			if len(hashPath) > 64 {
-				// Assume first 64 chars are the hash
-				hash = hashCandidate
+				remaining := hashPath[64:]
+				// Check if there's a dot followed by extension-like characters
+				if strings.HasPrefix(remaining, ".") && len(remaining) <= 11 { // .ext (max 10 chars for extension)
+					extension = remaining
+					hash = hashCandidate
+				} else {
+					// No valid extension, just take the hash
+					hash = hashCandidate
+				}
 			} else {
 				hash = hashCandidate
 			}
@@ -103,8 +112,8 @@ func main() {
 		if len(hash) == 64 {
 			// Verify it's valid hex
 			if _, err := hex.DecodeString(hash); err == nil {
-				// Modify the request path to contain only the hash for handlers
-				r.URL.Path = "/" + hash
+				// Preserve the full path including extension (if any) for handlers
+				r.URL.Path = "/" + hash + extension
 				switch r.Method {
 				case http.MethodGet:
 					blossomHandler.HandleDownload(w, r)
