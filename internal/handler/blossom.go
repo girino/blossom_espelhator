@@ -772,12 +772,14 @@ func (h *BlossomHandler) handleUploadPreflight(w http.ResponseWriter, r *http.Re
 				reason = reasons[0]
 			}
 
+			setCORSHeaders(w, r)
 			w.Header().Set("X-Reason", reason)
 			w.WriteHeader(uploadErr.StatusCode)
 			return
 		}
 
 		// Default to 500 for other errors
+		setCORSHeaders(w, r)
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
@@ -795,6 +797,7 @@ func (h *BlossomHandler) handleUploadPreflight(w http.ResponseWriter, r *http.Re
 	}
 
 	// Return 200 OK if at least minUploadServers would accept
+	setCORSHeaders(w, r)
 	w.WriteHeader(http.StatusOK)
 }
 
