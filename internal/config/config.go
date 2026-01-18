@@ -18,6 +18,13 @@ type Config struct {
 type UpstreamServer struct {
 	URL      string `yaml:"url"`
 	Priority int    `yaml:"priority"`
+
+	// Capabilities - which endpoints this server supports
+	// If not specified in config, defaults are:
+	// - supports_mirror: false (not all servers support BUD-04 mirror)
+	// - supports_upload_head: false (not all servers support BUD-06 HEAD /upload)
+	SupportsMirror     *bool `yaml:"supports_mirror,omitempty"`      // BUD-04: Mirroring
+	SupportsUploadHead *bool `yaml:"supports_upload_head,omitempty"` // BUD-06: Upload preflight
 }
 
 // ServerConfig represents the proxy server configuration
@@ -56,6 +63,18 @@ func Load(path string) (*Config, error) {
 	}
 	if config.Server.MaxRetries == 0 {
 		config.Server.MaxRetries = 3
+	}
+
+	// Set default capabilities for upstream servers (default to false for optional endpoints)
+	for i := range config.UpstreamServers {
+		if config.UpstreamServers[i].SupportsMirror == nil {
+			defaultMirror := false
+			config.UpstreamServers[i].SupportsMirror = &defaultMirror
+		}
+		if config.UpstreamServers[i].SupportsUploadHead == nil {
+			defaultUploadHead := false
+			config.UpstreamServers[i].SupportsUploadHead = &defaultUploadHead
+		}
 	}
 
 	// Validate configuration

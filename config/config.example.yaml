@@ -5,10 +5,15 @@
 upstream_servers:
   - url: "https://blossom1.example.com"
     priority: 1
+    supports_mirror: true          # BUD-04: Mirroring endpoint (PUT /mirror)
+    supports_upload_head: true     # BUD-06: Upload preflight (HEAD /upload)
   - url: "https://blossom2.example.com"
     priority: 2
+    supports_mirror: false         # This server doesn't support mirror
+    supports_upload_head: true
   - url: "https://blossom3.example.com"
     priority: 3
+    # If not specified, defaults to false (optional endpoints are opt-in)
 
 # Proxy server configuration
 server:

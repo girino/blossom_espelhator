@@ -18,14 +18,21 @@ import (
 
 // Manager manages upstream Blossom servers
 type Manager struct {
-	clients          []*client.Client
-	serverURLs       []string
-	minUploadServers int
-	redirectStrategy string
-	roundRobinIndex  int
-	roundRobinMutex  sync.Mutex
-	timeout          time.Duration
-	verbose          bool
+	clients            []*client.Client
+	serverURLs         []string
+	serverCapabilities []serverCapabilities // Capabilities for each server (indexed same as clients/serverURLs)
+	minUploadServers   int
+	redirectStrategy   string
+	roundRobinIndex    int
+	roundRobinMutex    sync.Mutex
+	timeout            time.Duration
+	verbose            bool
+}
+
+// serverCapabilities stores which endpoints a server supports
+type serverCapabilities struct {
+	SupportsMirror     bool
+	SupportsUploadHead bool
 }
 
 // UploadResult represents the result of an upload to a single server
@@ -55,28 +62,38 @@ func New(cfg *config.Config, verbose bool) (*Manager, error) {
 
 	clients := make([]*client.Client, 0, len(cfg.UpstreamServers))
 	serverURLs := make([]string, 0, len(cfg.UpstreamServers))
+	capabilities := make([]serverCapabilities, 0, len(cfg.UpstreamServers))
 
 	for _, server := range cfg.UpstreamServers {
 		cl := client.New(server.URL, cfg.Server.Timeout, verbose)
 		clients = append(clients, cl)
 		serverURLs = append(serverURLs, server.URL)
+
+		// Store capabilities (pointers default to nil if not set, but we set defaults in config.Load())
+		cap := serverCapabilities{
+			SupportsMirror:     server.SupportsMirror != nil && *server.SupportsMirror,
+			SupportsUploadHead: server.SupportsUploadHead != nil && *server.SupportsUploadHead,
+		}
+		capabilities = append(capabilities, cap)
 	}
 
 	if verbose {
 		log.Printf("[DEBUG] Upstream manager initialized with %d servers, min_upload_servers=%d, strategy=%s",
 			len(serverURLs), cfg.Server.MinUploadServers, cfg.Server.RedirectStrategy)
 		for i, url := range serverURLs {
-			log.Printf("[DEBUG]   Upstream server %d: %s", i+1, url)
+			log.Printf("[DEBUG]   Upstream server %d: %s (mirror=%t, upload_head=%t)",
+				i+1, url, capabilities[i].SupportsMirror, capabilities[i].SupportsUploadHead)
 		}
 	}
 
 	return &Manager{
-		clients:          clients,
-		serverURLs:       serverURLs,
-		minUploadServers: cfg.Server.MinUploadServers,
-		redirectStrategy: cfg.Server.RedirectStrategy,
-		timeout:          cfg.Server.Timeout,
-		verbose:          verbose,
+		clients:            clients,
+		serverURLs:         serverURLs,
+		serverCapabilities: capabilities,
+		minUploadServers:   cfg.Server.MinUploadServers,
+		redirectStrategy:   cfg.Server.RedirectStrategy,
+		timeout:            cfg.Server.Timeout,
+		verbose:            verbose,
 	}, nil
 }
 
@@ -229,10 +246,24 @@ func (m *Manager) UploadParallel(ctx context.Context, body io.Reader, contentTyp
 }
 
 // MirrorParallel sends mirror requests to multiple upstream servers in parallel (BUD-04)
+// Only sends to servers that support mirror capability
 // Returns the list of successful servers with their response bodies and an error if fewer than minUploadServers succeeded
 func (m *Manager) MirrorParallel(ctx context.Context, body io.Reader, contentType string, headers map[string]string) ([]UploadResultWithResponse, error) {
+	// Filter servers by mirror capability
+	mirrorCapableIndices := make([]int, 0)
+	for i, cap := range m.serverCapabilities {
+		if cap.SupportsMirror {
+			mirrorCapableIndices = append(mirrorCapableIndices, i)
+		}
+	}
+
+	if len(mirrorCapableIndices) == 0 {
+		return nil, fmt.Errorf("no upstream servers support mirror endpoint")
+	}
+
 	if m.verbose {
-		log.Printf("[DEBUG] MirrorParallel: starting parallel mirror requests to %d servers", len(m.clients))
+		log.Printf("[DEBUG] MirrorParallel: starting parallel mirror requests to %d/%d servers (filtered by capability)",
+			len(mirrorCapableIndices), len(m.clients))
 		log.Printf("[DEBUG] MirrorParallel: content-type=%s, headers=%v", contentType, headers)
 	}
 
@@ -241,7 +272,7 @@ func (m *Manager) MirrorParallel(ctx context.Context, body io.Reader, contentTyp
 	defer cancel()
 
 	// Channel to collect results
-	resultChan := make(chan UploadResult, len(m.clients))
+	resultChan := make(chan UploadResult, len(mirrorCapableIndices))
 
 	// Read body into memory so we can reuse it for multiple mirror requests
 	bodyBytes, err := io.ReadAll(body)
@@ -253,15 +284,17 @@ func (m *Manager) MirrorParallel(ctx context.Context, body io.Reader, contentTyp
 		log.Printf("[DEBUG] MirrorParallel: read %d bytes from request body", len(bodyBytes))
 	}
 
-	// Launch parallel mirror requests
+	// Launch parallel mirror requests (only to capable servers)
 	var wg sync.WaitGroup
-	for i, cl := range m.clients {
+	for _, idx := range mirrorCapableIndices {
 		wg.Add(1)
-		go func(idx int, c *client.Client, url string) {
+		cl := m.clients[idx]
+		url := m.serverURLs[idx]
+		go func(serverIdx int, c *client.Client, serverURL string) {
 			defer wg.Done()
 
 			if m.verbose {
-				log.Printf("[DEBUG] MirrorParallel: starting mirror request to server %d: %s", idx+1, url)
+				log.Printf("[DEBUG] MirrorParallel: starting mirror request to server: %s", serverURL)
 			}
 
 			// Create a new reader for each mirror request
@@ -288,14 +321,14 @@ func (m *Manager) MirrorParallel(ctx context.Context, body io.Reader, contentTyp
 
 			if m.verbose {
 				if err == nil {
-					log.Printf("[DEBUG] MirrorParallel: server %d (%s) succeeded in %v", idx+1, url, mirrorDuration)
+					log.Printf("[DEBUG] MirrorParallel: server %s succeeded in %v", serverURL, mirrorDuration)
 				} else {
-					log.Printf("[DEBUG] MirrorParallel: server %d (%s) failed in %v: %v", idx+1, url, mirrorDuration, err)
+					log.Printf("[DEBUG] MirrorParallel: server %s failed in %v: %v", serverURL, mirrorDuration, err)
 				}
 			}
 
 			resultChan <- result
-		}(i, cl, m.serverURLs[i])
+		}(idx, cl, url)
 	}
 
 	// Wait for all mirror requests to complete
@@ -322,9 +355,18 @@ func (m *Manager) MirrorParallel(ctx context.Context, body io.Reader, contentTyp
 	}
 
 	if m.verbose {
-		log.Printf("[DEBUG] MirrorParallel: successful servers: %d/%d", len(successfulServers), len(m.clients))
+		attemptedCount := len(mirrorCapableIndices)
+		log.Printf("[DEBUG] MirrorParallel: successful servers: %d/%d (attempted %d out of %d total)",
+			len(successfulServers), attemptedCount, attemptedCount, len(m.clients))
 		if len(errorDetails) > 0 {
 			log.Printf("[DEBUG] MirrorParallel: failed servers: %v", errorDetails)
+		}
+		if len(successfulServers) > 0 {
+			serverURLs := make([]string, 0, len(successfulServers))
+			for _, srv := range successfulServers {
+				serverURLs = append(serverURLs, srv.ServerURL)
+			}
+			log.Printf("[DEBUG] MirrorParallel: succeeded on servers: %v", serverURLs)
 		}
 	}
 
@@ -541,10 +583,24 @@ type UploadPreflightResult struct {
 }
 
 // UploadPreflightParallel performs HEAD /upload on all upstream servers in parallel to check upload requirements (BUD-06)
+// Only sends to servers that support HEAD /upload capability
 // Returns the list of servers that would accept the upload
 func (m *Manager) UploadPreflightParallel(ctx context.Context, headers map[string]string) ([]UploadPreflightResult, error) {
+	// Filter servers by upload_head capability
+	uploadHeadCapableIndices := make([]int, 0)
+	for i, cap := range m.serverCapabilities {
+		if cap.SupportsUploadHead {
+			uploadHeadCapableIndices = append(uploadHeadCapableIndices, i)
+		}
+	}
+
+	if len(uploadHeadCapableIndices) == 0 {
+		return nil, fmt.Errorf("no upstream servers support HEAD /upload endpoint")
+	}
+
 	if m.verbose {
-		log.Printf("[DEBUG] UploadPreflightParallel: checking upload requirements on %d servers", len(m.clients))
+		log.Printf("[DEBUG] UploadPreflightParallel: checking upload requirements on %d/%d servers (filtered by capability)",
+			len(uploadHeadCapableIndices), len(m.clients))
 		log.Printf("[DEBUG] UploadPreflightParallel: headers=%v", headers)
 	}
 
@@ -553,26 +609,28 @@ func (m *Manager) UploadPreflightParallel(ctx context.Context, headers map[strin
 	defer cancel()
 
 	// Channel to collect results
-	resultChan := make(chan UploadPreflightResult, len(m.clients))
+	resultChan := make(chan UploadPreflightResult, len(uploadHeadCapableIndices))
 
-	// Launch parallel HEAD /upload requests
+	// Launch parallel HEAD /upload requests (only to capable servers)
 	var wg sync.WaitGroup
-	for i, cl := range m.clients {
+	for _, idx := range uploadHeadCapableIndices {
 		wg.Add(1)
-		go func(idx int, c *client.Client, url string) {
+		cl := m.clients[idx]
+		url := m.serverURLs[idx]
+		go func(serverIdx int, c *client.Client, serverURL string) {
 			defer wg.Done()
 
 			if m.verbose {
-				log.Printf("[DEBUG] UploadPreflightParallel: checking server %d: %s", idx+1, url)
+				log.Printf("[DEBUG] UploadPreflightParallel: checking server: %s", serverURL)
 			}
 
 			resp, err := c.HeadUpload(preflightCtx, headers)
 			if err != nil {
 				if m.verbose {
-					log.Printf("[DEBUG] UploadPreflightParallel: server %d (%s) failed: %v", idx+1, url, err)
+					log.Printf("[DEBUG] UploadPreflightParallel: server %s failed: %v", serverURL, err)
 				}
 				resultChan <- UploadPreflightResult{
-					ServerURL:  url,
+					ServerURL:  serverURL,
 					Accepted:   false,
 					StatusCode: 0,
 					Error:      err,
@@ -586,20 +644,20 @@ func (m *Manager) UploadPreflightParallel(ctx context.Context, headers map[strin
 
 			if m.verbose {
 				if accepted {
-					log.Printf("[DEBUG] UploadPreflightParallel: server %d (%s) accepted (status=%d)", idx+1, url, resp.StatusCode)
+					log.Printf("[DEBUG] UploadPreflightParallel: server %s accepted (status=%d)", serverURL, resp.StatusCode)
 				} else {
-					log.Printf("[DEBUG] UploadPreflightParallel: server %d (%s) rejected (status=%d, X-Reason=%s)", idx+1, url, resp.StatusCode, xReason)
+					log.Printf("[DEBUG] UploadPreflightParallel: server %s rejected (status=%d, X-Reason=%s)", serverURL, resp.StatusCode, xReason)
 				}
 			}
 
 			resultChan <- UploadPreflightResult{
-				ServerURL:  url,
+				ServerURL:  serverURL,
 				Accepted:   accepted,
 				StatusCode: resp.StatusCode,
 				XReason:    xReason,
 				Error:      nil,
 			}
-		}(i, cl, m.serverURLs[i])
+		}(idx, cl, url)
 	}
 
 	wg.Wait()

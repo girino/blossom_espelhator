@@ -302,10 +302,67 @@ func (h *BlossomHandler) HandleMirror(w http.ResponseWriter, r *http.Request) {
 		log.Printf("[DEBUG] HandleMirror: using response body from upstream: %s", string(selectedServer.ResponseBody))
 	}
 
-	// Return the selected server's response
+	// Parse the selected server's response
+	var responseData map[string]interface{}
+	if err := json.Unmarshal(selectedServer.ResponseBody, &responseData); err != nil {
+		if h.verbose {
+			log.Printf("[DEBUG] HandleMirror: failed to parse selected server response: %v", err)
+		}
+		// If parsing fails, return original response
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write(selectedServer.ResponseBody)
+		return
+	}
+
+	// Collect all URLs from all successful servers
+	altURLs := make([]string, 0)
+	for _, srv := range successfulServers {
+		var srvData map[string]interface{}
+		if err := json.Unmarshal(srv.ResponseBody, &srvData); err != nil {
+			if h.verbose {
+				log.Printf("[DEBUG] HandleMirror: failed to parse server response from %s: %v", srv.ServerURL, err)
+			}
+			continue
+		}
+		if urlVal, ok := srvData["url"].(string); ok && urlVal != "" {
+			// Add URL if not already in altURLs
+			found := false
+			for _, altURL := range altURLs {
+				if altURL == urlVal {
+					found = true
+					break
+				}
+			}
+			if !found {
+				altURLs = append(altURLs, urlVal)
+			}
+		}
+	}
+
+	// Always add alturls field (even if empty or single URL)
+	responseData["alturls"] = altURLs
+
+	if h.verbose {
+		log.Printf("[DEBUG] HandleMirror: added alturls with %d URLs: %v", len(altURLs), altURLs)
+	}
+
+	// Marshal and return the modified response
+	responseJSON, err := json.Marshal(responseData)
+	if err != nil {
+		if h.verbose {
+			log.Printf("[DEBUG] HandleMirror: failed to marshal response: %v", err)
+		}
+		// Fallback to original response
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write(selectedServer.ResponseBody)
+		return
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	w.Write(selectedServer.ResponseBody)
+	w.Write(responseJSON)
 }
 
 // handleUploadPreflight handles HEAD /upload requests (BUD-06: Upload requirements preflight check)
