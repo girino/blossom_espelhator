@@ -14,6 +14,7 @@ import (
 
 	"github.com/girino/blossom_espelhator/internal/auth"
 	"github.com/girino/blossom_espelhator/internal/cache"
+	"github.com/girino/blossom_espelhator/internal/client"
 	"github.com/girino/blossom_espelhator/internal/config"
 	"github.com/girino/blossom_espelhator/internal/stats"
 	"github.com/girino/blossom_espelhator/internal/upstream"
@@ -900,10 +901,34 @@ func (h *BlossomHandler) HandleDownload(w http.ResponseWriter, r *http.Request) 
 	// Track download success for the selected server
 	h.stats.RecordSuccess(selectedServer, "download")
 
+	// If no extension in request, try to get it from Content-Type header of selected server
+	if ext == "" {
+		// Create a client for the selected server to make a HEAD request
+		selectedClient := client.New(selectedServer, h.config.Server.Timeout, h.verbose)
+		headResp, err := selectedClient.Head(r.Context(), hash)
+		if err == nil && headResp != nil {
+			contentType := headResp.Header.Get("Content-Type")
+			if contentType != "" {
+				// Parse Content-Type (may contain charset, e.g., "image/png; charset=utf-8")
+				if idx := strings.Index(contentType, ";"); idx != -1 {
+					contentType = strings.TrimSpace(contentType[:idx])
+				}
+				derivedExt := mimeTypeToExtension(contentType)
+				if derivedExt != "" {
+					ext = derivedExt
+					if h.verbose {
+						log.Printf("[DEBUG] HandleDownload: derived extension %q from Content-Type %q", ext, contentType)
+					}
+				}
+			}
+			headResp.Body.Close()
+		}
+	}
+
 	// Always redirect to upstream server (not local)
 	// "local" strategy only affects response URLs in upload/mirror/list, not download redirects
 	// When "local" is set, we still use round-robin to select an upstream server for redirects
-	// Preserve extension from original request if present
+	// Preserve extension from original request if present, or use derived extension
 	redirectPath := hash
 	if ext != "" {
 		redirectPath = hash + ext
