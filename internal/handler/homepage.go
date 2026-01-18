@@ -18,6 +18,7 @@ type HomePageData struct {
 	TotalDeletes     int64
 	TotalLists       int64
 	ServerStats      []ServerStat
+	ServerAddress    string
 }
 
 // ServerStat holds statistics for a single server
@@ -41,7 +42,7 @@ const homepageHTML = `<!DOCTYPE html>
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Blossom Proxy - Status</title>
+    <title>Blossom Espelhator Tabajara - Status</title>
     <style>
         * {
             margin: 0;
@@ -183,12 +184,63 @@ const homepageHTML = `<!DOCTYPE html>
             color: white;
             opacity: 0.8;
         }
+        .docs-section {
+            background: white;
+            border-radius: 10px;
+            padding: 30px;
+            margin-top: 20px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        }
+        .docs-section h2 {
+            color: #667eea;
+            margin-bottom: 20px;
+        }
+        .docs-section h3 {
+            color: #667eea;
+            margin-top: 25px;
+            margin-bottom: 15px;
+        }
+        .docs-section p {
+            color: #4b5563;
+            line-height: 1.6;
+            margin-bottom: 15px;
+        }
+        .docs-section ul {
+            margin-left: 20px;
+            margin-bottom: 15px;
+        }
+        .docs-section li {
+            color: #4b5563;
+            margin-bottom: 8px;
+            line-height: 1.6;
+        }
+        .docs-section code {
+            background: #f3f4f6;
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-family: 'Courier New', monospace;
+            color: #667eea;
+            font-size: 0.9em;
+        }
+        .docs-section pre {
+            background: #1f2937;
+            color: #f3f4f6;
+            padding: 15px;
+            border-radius: 8px;
+            overflow-x: auto;
+            margin: 15px 0;
+        }
+        .docs-section pre code {
+            background: transparent;
+            color: #f3f4f6;
+            padding: 0;
+        }
     </style>
 </head>
 <body>
     <div class="container">
         <div class="header">
-            <h1>🌺 Blossom Proxy Server</h1>
+            <h1>🌺 Blossom Espelhator Tabajara</h1>
             <p>Status Dashboard</p>
             <span class="status-badge {{if .Healthy}}status-healthy{{else}}status-unhealthy{{end}}">
                 {{if .Healthy}}✓ Healthy{{else}}✗ Unhealthy{{end}}
@@ -269,8 +321,60 @@ const homepageHTML = `<!DOCTYPE html>
             {{end}}
         </div>
 
+        <div class="docs-section">
+            <h2>📖 Usage</h2>
+            
+            <h3>Configure in Nostr Clients</h3>
+            <p>To use this Blossom proxy server, configure your Nostr client to use this server address for media uploads:</p>
+            <pre><code>{{.ServerAddress}}</code></pre>
+            <p>Most Nostr clients allow you to configure a custom Blossom server in their settings. Look for:</p>
+            <ul>
+                <li><strong>Media/Blob Storage Settings</strong> - Set the Blossom server URL</li>
+                <li><strong>File Upload Configuration</strong> - Specify this server for media uploads</li>
+                <li><strong>Blossom Server URL</strong> - Enter the server address above</li>
+            </ul>
+            <p>When you upload files through your Nostr client:</p>
+            <ul>
+                <li>Files are automatically forwarded to multiple upstream Blossom servers</li>
+                <li>The proxy ensures redundancy by uploading to at least {{.MinUploadServers}} servers</li>
+                <li>SHA256 hashes are used for blob addressing</li>
+                <li>Downloads automatically redirect to the best available upstream server</li>
+            </ul>
+
+            <h3>Access Files</h3>
+            <p>Uploaded files can be accessed via:</p>
+            <ul>
+                <li><strong>Blossom URL:</strong> <code>{{.ServerAddress}}/&lt;sha256&gt;.&lt;ext&gt;</code> - Download endpoint (redirects to upstream server)</li>
+                <li><strong>Direct URL:</strong> Use the URLs returned in upload responses from upstream servers</li>
+            </ul>
+
+            <h3>🔗 API Endpoints</h3>
+            <ul>
+                <li><strong>GET /</strong> - This home page</li>
+                <li><strong>GET /health</strong> - Health check endpoint (returns JSON)</li>
+                <li><strong>GET /stats</strong> - Statistics endpoint (returns JSON with detailed stats)</li>
+                <li><strong>PUT /upload</strong> - Upload a file (Blossom protocol - forwards to upstream servers)</li>
+                <li><strong>PUT /mirror</strong> - Mirror a blob (BUD-04 - forwards to upstream servers)</li>
+                <li><strong>HEAD /upload</strong> - Upload preflight check (BUD-06 - checks upstream servers)</li>
+                <li><strong>GET /list/&lt;pubkey&gt;</strong> - List files for a pubkey (Blossom protocol - merges results from all upstream servers)</li>
+                <li><strong>GET /&lt;sha256&gt;.&lt;ext&gt;</strong> - Get file (redirects to upstream server)</li>
+                <li><strong>HEAD /&lt;sha256&gt;.&lt;ext&gt;</strong> - Check file existence (proxies HEAD request)</li>
+                <li><strong>DELETE /&lt;sha256&gt;</strong> - Delete file (forwards to all upstream servers that have it)</li>
+            </ul>
+
+            <h3>📋 About This Proxy</h3>
+            <p>This is a Blossom protocol proxy server that forwards requests to multiple upstream Blossom servers. It provides:</p>
+            <ul>
+                <li><strong>Redundancy:</strong> Uploads are forwarded to multiple servers for backup</li>
+                <li><strong>Load Distribution:</strong> Downloads are distributed across healthy upstream servers</li>
+                <li><strong>Health Monitoring:</strong> Tracks server health and marks unhealthy servers after consecutive failures</li>
+                <li><strong>Statistics:</strong> Aggregates statistics from all upstream servers</li>
+                <li><strong>Unified API:</strong> Single endpoint for multiple upstream Blossom servers</li>
+            </ul>
+        </div>
+
         <div class="footer">
-            <p>Blossom Proxy Server | <a href="/health" style="color: white;">Health API</a> | <a href="/stats" style="color: white;">Stats API</a></p>
+            <p>Blossom Espelhator Tabajara | <a href="/health" style="color: white;">Health API</a> | <a href="/stats" style="color: white;">Stats API</a></p>
         </div>
     </div>
 </body>
@@ -290,6 +394,12 @@ func (h *BlossomHandler) HandleHome(w http.ResponseWriter, r *http.Request) {
 	allStats := h.stats.GetAll()
 	totalServers := len(allStats)
 	isHealthy := healthyCount >= minUploadServers
+
+	// Get server address from request
+	serverAddress := "http://" + r.Host
+	if r.TLS != nil {
+		serverAddress = "https://" + r.Host
+	}
 
 	// Calculate totals
 	var totalUploads, totalDownloads, totalMirrors, totalDeletes, totalLists int64
@@ -329,6 +439,7 @@ func (h *BlossomHandler) HandleHome(w http.ResponseWriter, r *http.Request) {
 		TotalDeletes:     totalDeletes,
 		TotalLists:       totalLists,
 		ServerStats:      serverStats,
+		ServerAddress:    serverAddress,
 	}
 
 	tmpl, err := template.New("homepage").Parse(homepageHTML)
