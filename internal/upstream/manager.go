@@ -542,12 +542,17 @@ func (m *Manager) selectPriorityWithResponse(availableServers []UploadResultWith
 
 // SelectServer selects a server URL for redirect based on the configured strategy (legacy method for download)
 func (m *Manager) SelectServerURL(availableServers []string) (string, error) {
+	return m.SelectServerURLWithStrategy(availableServers, m.redirectStrategy)
+}
+
+// SelectServerURLWithStrategy selects a server URL using the specified strategy
+func (m *Manager) SelectServerURLWithStrategy(availableServers []string, strategy string) (string, error) {
 	if len(availableServers) == 0 {
 		return "", fmt.Errorf("no available servers")
 	}
 
 	var selected string
-	switch m.redirectStrategy {
+	switch strategy {
 	case "round_robin":
 		selected = m.selectRoundRobin(availableServers)
 	case "random":
@@ -566,7 +571,7 @@ func (m *Manager) SelectServerURL(availableServers []string) (string, error) {
 	}
 
 	if m.verbose {
-		log.Printf("[DEBUG] SelectServerURL: strategy=%s, available=%d servers, selected=%s", m.redirectStrategy, len(availableServers), selected)
+		log.Printf("[DEBUG] SelectServerURL: strategy=%s, available=%d servers, selected=%s", strategy, len(availableServers), selected)
 	}
 
 	return selected, nil

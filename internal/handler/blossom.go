@@ -813,11 +813,25 @@ func (h *BlossomHandler) HandleDownload(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// Extract hash from path (remove leading slash)
-	hash := strings.TrimPrefix(r.URL.Path, "/")
+	// Extract hash and extension from path (remove leading slash)
+	path := strings.TrimPrefix(r.URL.Path, "/")
+
+	// Extract extension if present (e.g., /hash.png -> extension = ".png")
+	var ext string
+	if lastDot := strings.LastIndex(path, "."); lastDot > 0 {
+		// Extract everything after the last dot as extension
+		potentialExt := path[lastDot:]
+		// Validate it looks like a file extension (not too long, reasonable chars)
+		if len(potentialExt) <= 10 && len(potentialExt) > 1 {
+			ext = potentialExt
+			path = path[:lastDot] // Remove extension from path
+		}
+	}
+
+	hash := path
 
 	if h.verbose {
-		log.Printf("[DEBUG] HandleDownload: extracted hash: %s", hash)
+		log.Printf("[DEBUG] HandleDownload: extracted hash: %s, extension: %s", hash, ext)
 	}
 
 	// Validate hash format (should be 64 hex characters for SHA256)
@@ -864,8 +878,12 @@ func (h *BlossomHandler) HandleDownload(w http.ResponseWriter, r *http.Request) 
 		log.Printf("[DEBUG] HandleDownload: hash found in cache with %d servers: %v", len(servers), servers)
 	}
 
-	// Select a server for redirect
-	selectedServer, err := h.upstreamManager.SelectServerURL(servers)
+	// Select a server for redirect using download_redirect_strategy if set, otherwise fall back to redirect_strategy
+	downloadStrategy := h.config.Server.DownloadRedirectStrategy
+	if downloadStrategy == "" {
+		downloadStrategy = h.config.Server.RedirectStrategy
+	}
+	selectedServer, err := h.upstreamManager.SelectServerURLWithStrategy(servers, downloadStrategy)
 	if err != nil {
 		if h.verbose {
 			log.Printf("[DEBUG] HandleDownload: failed to select server: %v", err)
@@ -880,7 +898,12 @@ func (h *BlossomHandler) HandleDownload(w http.ResponseWriter, r *http.Request) 
 	// Always redirect to upstream server (not local)
 	// "local" strategy only affects response URLs in upload/mirror/list, not download redirects
 	// When "local" is set, we still use round-robin to select an upstream server for redirects
-	redirectURL := fmt.Sprintf("%s/%s", selectedServer, hash)
+	// Preserve extension from original request if present
+	redirectPath := hash
+	if ext != "" {
+		redirectPath = hash + ext
+	}
+	redirectURL := fmt.Sprintf("%s/%s", selectedServer, redirectPath)
 
 	if h.verbose {
 		log.Printf("[DEBUG] HandleDownload: selected server: %s", selectedServer)

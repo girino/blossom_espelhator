@@ -29,12 +29,13 @@ type UpstreamServer struct {
 
 // ServerConfig represents the proxy server configuration
 type ServerConfig struct {
-	ListenAddr       string        `yaml:"listen_addr"`
-	MinUploadServers int           `yaml:"min_upload_servers"`
-	RedirectStrategy string        `yaml:"redirect_strategy"`
-	BaseURL          string        `yaml:"base_url"` // Base URL for local strategy (overrides request-derived URL)
-	Timeout          time.Duration `yaml:"timeout"`
-	MaxRetries       int           `yaml:"max_retries"`
+	ListenAddr               string        `yaml:"listen_addr"`
+	MinUploadServers         int           `yaml:"min_upload_servers"`
+	RedirectStrategy         string        `yaml:"redirect_strategy"`
+	DownloadRedirectStrategy string        `yaml:"download_redirect_strategy"` // Fallback redirect strategy for GET requests (defaults to redirect_strategy)
+	BaseURL                  string        `yaml:"base_url"`                   // Base URL for local strategy (overrides request-derived URL)
+	Timeout                  time.Duration `yaml:"timeout"`
+	MaxRetries               int           `yaml:"max_retries"`
 
 	// Health check configuration
 	MaxFailures    int   `yaml:"max_failures"`     // Maximum consecutive failures before marking server unhealthy

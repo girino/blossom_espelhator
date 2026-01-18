@@ -28,12 +28,18 @@ server:
   # Options: "round_robin", "random", "health_based", "priority", "local"
   # - "round_robin": Cycles through available servers
   # - "random": Randomly selects from available servers
-  # - "health_based": Uses round-robin (health checking not yet implemented)
+  # - "health_based": Selects from servers with the least total failures, using round-robin for ties
   # - "priority": Selects server with lowest priority number (lower is better)
-  # - "local": Returns local URL (base_url/sha256.ext) in response URLs (upload/mirror/list)
-  #            Downloads still redirect to upstream servers using round-robin
-  #            Extension is derived from mime type or file extension
+  # - "local": For downloads, uses round-robin to select an upstream server for redirection.
+  #            For upload/mirror/list responses, returns local URL (base_url/sha256.ext).
   redirect_strategy: "round_robin"
+  
+  # Fallback redirect strategy specifically for GET (download) requests
+  # If not set or empty, falls back to redirect_strategy
+  # Options: same as redirect_strategy
+  # This allows using a different strategy for downloads vs. uploads/mirrors/lists
+  # Example: Use "priority" for downloads while using "health_based" for uploads
+  # download_redirect_strategy: ""
   
   # Base URL for constructing local URLs (independent of redirect_strategy)
   # If set, this URL will be used when constructing local URLs (when redirect_strategy is "local")
