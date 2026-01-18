@@ -154,7 +154,7 @@ func setCORSHeaders(w http.ResponseWriter, r *http.Request) {
 	} else {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 	}
-	w.Header().Set("Access-Control-Allow-Methods", "HEAD, PUT, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Methods", "GET, HEAD, PUT, DELETE, OPTIONS, POST")
 	w.Header().Set("Access-Control-Allow-Headers", "authorization, x-content-length, x-content-type, x-sha-256, content-type")
 }
 
@@ -940,6 +940,9 @@ func (h *BlossomHandler) HandleDownload(w http.ResponseWriter, r *http.Request) 
 		log.Printf("[DEBUG] HandleDownload: extension from request: %q, redirectPath: %s", ext, redirectPath)
 		log.Printf("[DEBUG] HandleDownload: redirecting to: %s", redirectURL)
 	}
+
+	// Set CORS headers on redirect response
+	setCORSHeaders(w, r)
 
 	http.Redirect(w, r, redirectURL, http.StatusTemporaryRedirect)
 }
