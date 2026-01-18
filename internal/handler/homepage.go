@@ -4,21 +4,28 @@ import (
 	"fmt"
 	"html/template"
 	"net/http"
+	"runtime"
 )
 
 // HomePageData holds data for the home page
 type HomePageData struct {
-	Healthy          bool
-	HealthyCount     int
-	MinUploadServers int
-	TotalServers     int
-	TotalUploads     int64
-	TotalDownloads   int64
-	TotalMirrors     int64
-	TotalDeletes     int64
-	TotalLists       int64
-	ServerStats      []ServerStat
-	ServerAddress    string
+	Healthy           bool
+	HealthyCount      int
+	MinUploadServers  int
+	TotalServers      int
+	TotalUploads      int64
+	TotalDownloads    int64
+	TotalMirrors      int64
+	TotalDeletes      int64
+	TotalLists        int64
+	ServerStats       []ServerStat
+	ServerAddress     string
+	MemoryMB          float64
+	MaxMemoryMB       float64
+	MemoryHealthy     bool
+	Goroutines        int
+	MaxGoroutines     int
+	GoroutinesHealthy bool
 }
 
 // ServerStat holds statistics for a single server
@@ -248,6 +255,24 @@ const homepageHTML = `<!DOCTYPE html>
             <p style="margin-top: 15px; color: #6b7280;">
                 {{.HealthyCount}} / {{.TotalServers}} servers healthy (minimum {{.MinUploadServers}} required)
             </p>
+            <div style="margin-top: 20px; padding-top: 20px; border-top: 1px solid #e5e7eb;">
+                <div style="display: flex; gap: 20px; flex-wrap: wrap;">
+                    <div>
+                        <strong>Memory:</strong> 
+                        <span style="color: {{if .MemoryHealthy}}#10b981{{else}}#ef4444{{end}};">
+                            {{printf "%.2f MB" .MemoryMB}} / {{printf "%.0f MB" .MaxMemoryMB}}
+                            {{if .MemoryHealthy}}✓{{else}}✗{{end}}
+                        </span>
+                    </div>
+                    <div>
+                        <strong>Goroutines:</strong> 
+                        <span style="color: {{if .GoroutinesHealthy}}#10b981{{else}}#ef4444{{end}};">
+                            {{.Goroutines}} / {{.MaxGoroutines}}
+                            {{if .GoroutinesHealthy}}✓{{else}}✗{{end}}
+                        </span>
+                    </div>
+                </div>
+            </div>
         </div>
 
         <div class="stats-grid">
@@ -393,7 +418,20 @@ func (h *BlossomHandler) HandleHome(w http.ResponseWriter, r *http.Request) {
 	minUploadServers := h.config.Server.MinUploadServers
 	allStats := h.stats.GetAll()
 	totalServers := len(allStats)
-	isHealthy := healthyCount >= minUploadServers
+
+	// Get system metrics
+	var m runtime.MemStats
+	runtime.ReadMemStats(&m)
+	memoryBytes := int64(m.Alloc)
+	goroutines := runtime.NumGoroutine()
+
+	// Check if system metrics are healthy
+	memoryHealthy := memoryBytes < h.config.Server.MaxMemoryBytes
+	goroutinesHealthy := goroutines < h.config.Server.MaxGoroutines
+	serversHealthy := healthyCount >= minUploadServers
+
+	// System is healthy if all checks pass
+	isHealthy := memoryHealthy && goroutinesHealthy && serversHealthy
 
 	// Get server address from request
 	serverAddress := "http://" + r.Host
@@ -429,17 +467,23 @@ func (h *BlossomHandler) HandleHome(w http.ResponseWriter, r *http.Request) {
 	}
 
 	data := HomePageData{
-		Healthy:          isHealthy,
-		HealthyCount:     healthyCount,
-		MinUploadServers: minUploadServers,
-		TotalServers:     totalServers,
-		TotalUploads:     totalUploads,
-		TotalDownloads:   totalDownloads,
-		TotalMirrors:     totalMirrors,
-		TotalDeletes:     totalDeletes,
-		TotalLists:       totalLists,
-		ServerStats:      serverStats,
-		ServerAddress:    serverAddress,
+		Healthy:           isHealthy,
+		HealthyCount:      healthyCount,
+		MinUploadServers:  minUploadServers,
+		TotalServers:      totalServers,
+		TotalUploads:      totalUploads,
+		TotalDownloads:    totalDownloads,
+		TotalMirrors:      totalMirrors,
+		TotalDeletes:      totalDeletes,
+		TotalLists:        totalLists,
+		ServerStats:       serverStats,
+		ServerAddress:     serverAddress,
+		MemoryMB:          float64(memoryBytes) / 1048576.0,
+		MaxMemoryMB:       float64(h.config.Server.MaxMemoryBytes) / 1048576.0,
+		MemoryHealthy:     memoryHealthy,
+		Goroutines:        goroutines,
+		MaxGoroutines:     h.config.Server.MaxGoroutines,
+		GoroutinesHealthy: goroutinesHealthy,
 	}
 
 	tmpl, err := template.New("homepage").Parse(homepageHTML)

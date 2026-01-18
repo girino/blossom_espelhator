@@ -8,6 +8,7 @@ services:
     image: blossom-espelhator:latest
     container_name: blossom-espelhator
     restart: unless-stopped
+    command: ["./blossom_espelhator", "-config", "/app/config/config.yaml", "-v"]
     ports:
       - "7624:7624"
     volumes:
