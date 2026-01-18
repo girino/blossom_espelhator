@@ -912,6 +912,7 @@ func (h *BlossomHandler) HandleDownload(w http.ResponseWriter, r *http.Request) 
 
 	if h.verbose {
 		log.Printf("[DEBUG] HandleDownload: selected server: %s", selectedServer)
+		log.Printf("[DEBUG] HandleDownload: extension from request: %q, redirectPath: %s", ext, redirectPath)
 		log.Printf("[DEBUG] HandleDownload: redirecting to: %s", redirectURL)
 	}
 
