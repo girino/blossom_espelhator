@@ -164,3 +164,20 @@ func (s *Stats) GetHealthStatus() map[string]bool {
 	}
 	return result
 }
+
+// InitializeServers initializes stats for all given server URLs, marking them as healthy
+// This should be called at startup to ensure all servers start as healthy
+func (s *Stats) InitializeServers(serverURLs []string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for _, url := range serverURLs {
+		// Only initialize if not already present (don't overwrite existing stats)
+		if _, exists := s.serverStats[url]; !exists {
+			s.serverStats[url] = &ServerStats{
+				URL:       url,
+				IsHealthy: true,
+			}
+		}
+	}
+}

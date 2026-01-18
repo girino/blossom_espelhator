@@ -40,6 +40,10 @@ func main() {
 		log.Fatalf("Failed to initialize upstream manager: %v", err)
 	}
 
+	// Initialize stats for all upstream servers (they all start as healthy)
+	allServerURLs := upstreamManager.GetServerURLs()
+	statsTracker.InitializeServers(allServerURLs)
+
 	// Initialize handler
 	blossomHandler := handler.New(upstreamManager, cache, statsTracker, cfg, *verbose)
 
@@ -61,14 +65,16 @@ func main() {
 	// List endpoint
 	mux.HandleFunc("/list/", blossomHandler.HandleList)
 
-	// Download and Delete endpoints (hash-based)
-	// These need to be handled by a catch-all that validates the hash format
+	// Home page endpoint
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		path := r.URL.Path
-		if path == "/" {
-			http.Error(w, "Not found", http.StatusNotFound)
+		if path == "/" && r.Method == http.MethodGet {
+			blossomHandler.HandleHome(w, r)
 			return
 		}
+
+		// Download and Delete endpoints (hash-based)
+		// These need to be handled by a catch-all that validates the hash format
 
 		// Remove leading slash
 		hashPath := path[1:]
