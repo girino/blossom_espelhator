@@ -235,7 +235,9 @@ func (h *BlossomHandler) HandleUpload(w http.ResponseWriter, r *http.Request) {
 	headers := make(map[string]string)
 	for k, v := range r.Header {
 		// Skip certain headers that shouldn't be forwarded
-		if strings.ToLower(k) == "host" || strings.ToLower(k) == "content-length" {
+		// Also skip Accept-Encoding since we control it explicitly in the client
+		lowerKey := strings.ToLower(k)
+		if lowerKey == "host" || lowerKey == "content-length" || lowerKey == "accept-encoding" {
 			continue
 		}
 		if len(v) > 0 {
@@ -508,7 +510,9 @@ func (h *BlossomHandler) HandleMirror(w http.ResponseWriter, r *http.Request) {
 	headers := make(map[string]string)
 	for k, v := range r.Header {
 		// Skip certain headers that shouldn't be forwarded
-		if strings.ToLower(k) == "host" || strings.ToLower(k) == "content-length" {
+		// Also skip Accept-Encoding since we control it explicitly in the client
+		lowerKey := strings.ToLower(k)
+		if lowerKey == "host" || lowerKey == "content-length" || lowerKey == "accept-encoding" {
 			continue
 		}
 		if len(v) > 0 {

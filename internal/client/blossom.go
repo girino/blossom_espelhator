@@ -53,14 +53,8 @@ func (c *Client) Upload(ctx context.Context, body io.Reader, contentType string,
 		req.Header.Set(k, v)
 	}
 
-	// Tell server we only accept gzip, not brotli (set AFTER copying headers to override any Accept-Encoding from client)
-	if c.verbose {
-		prevEncoding := req.Header.Get("Accept-Encoding")
-		if prevEncoding != "" {
-			log.Printf("[DEBUG] Client.Upload: previous Accept-Encoding from client: %s (overriding to 'gzip')", prevEncoding)
-		}
-	}
-	req.Header.Set("Accept-Encoding", "gzip")
+	// Explicitly don't request compression (responses are short JSON, uncompressed is fine)
+	req.Header.Del("Accept-Encoding")
 
 	if c.verbose {
 		log.Printf("[DEBUG] Client.Upload: sending request to %s", url)
@@ -124,8 +118,8 @@ func (c *Client) Download(ctx context.Context, hash string) (string, error) {
 		return "", fmt.Errorf("failed to create request: %w", err)
 	}
 
-	// Tell server we only accept gzip, not brotli
-	req.Header.Set("Accept-Encoding", "gzip")
+	// Explicitly don't request compression (responses are short, uncompressed is fine)
+	req.Header.Del("Accept-Encoding")
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -160,8 +154,8 @@ func (c *Client) List(ctx context.Context, pubkey string) ([]byte, error) {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 
-	// Tell server we only accept gzip, not brotli
-	req.Header.Set("Accept-Encoding", "gzip")
+	// Explicitly don't request compression (responses are short, uncompressed is fine)
+	req.Header.Del("Accept-Encoding")
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -211,14 +205,8 @@ func (c *Client) Delete(ctx context.Context, hash string, headers map[string]str
 		req.Header.Set(k, v)
 	}
 
-	// Tell server we only accept gzip, not brotli (set AFTER copying headers to override any Accept-Encoding from client)
-	if c.verbose {
-		prevEncoding := req.Header.Get("Accept-Encoding")
-		if prevEncoding != "" {
-			log.Printf("[DEBUG] Client.Delete: previous Accept-Encoding from client: %s (overriding to 'gzip')", prevEncoding)
-		}
-	}
-	req.Header.Set("Accept-Encoding", "gzip")
+	// Explicitly don't request compression (responses are short, uncompressed is fine)
+	req.Header.Del("Accept-Encoding")
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -258,8 +246,8 @@ func (c *Client) CheckHealth(ctx context.Context) error {
 		return fmt.Errorf("failed to create request: %w", err)
 	}
 
-	// Tell server we only accept gzip, not brotli
-	req.Header.Set("Accept-Encoding", "gzip")
+	// Explicitly don't request compression (responses are short, uncompressed is fine)
+	req.Header.Del("Accept-Encoding")
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -289,8 +277,8 @@ func (c *Client) Head(ctx context.Context, hash string) (*http.Response, error) 
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 
-	// Tell server we only accept gzip, not brotli
-	req.Header.Set("Accept-Encoding", "gzip")
+	// Explicitly don't request compression (responses are short, uncompressed is fine)
+	req.Header.Del("Accept-Encoding")
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -327,14 +315,8 @@ func (c *Client) HeadUpload(ctx context.Context, headers map[string]string) (*ht
 		req.Header.Set(k, v)
 	}
 
-	// Tell server we only accept gzip, not brotli (set AFTER copying headers to override any Accept-Encoding from client)
-	if c.verbose {
-		prevEncoding := req.Header.Get("Accept-Encoding")
-		if prevEncoding != "" {
-			log.Printf("[DEBUG] Client.HeadUpload: previous Accept-Encoding from client: %s (overriding to 'gzip')", prevEncoding)
-		}
-	}
-	req.Header.Set("Accept-Encoding", "gzip")
+	// Explicitly don't request compression (responses are short, uncompressed is fine)
+	req.Header.Del("Accept-Encoding")
 
 	if c.verbose {
 		log.Printf("[DEBUG] Client.HeadUpload: sending HEAD request to %s", url)
@@ -384,14 +366,8 @@ func (c *Client) Mirror(ctx context.Context, body io.Reader, contentType string,
 		req.Header.Set(k, v)
 	}
 
-	// Tell server we only accept gzip, not brotli (set AFTER copying headers to override any Accept-Encoding from client)
-	if c.verbose {
-		prevEncoding := req.Header.Get("Accept-Encoding")
-		if prevEncoding != "" {
-			log.Printf("[DEBUG] Client.Mirror: previous Accept-Encoding from client: %s (overriding to 'gzip')", prevEncoding)
-		}
-	}
-	req.Header.Set("Accept-Encoding", "gzip")
+	// Explicitly don't request compression (responses are short, uncompressed is fine)
+	req.Header.Del("Accept-Encoding")
 
 	if c.verbose {
 		log.Printf("[DEBUG] Client.Mirror: sending request to %s", url)
