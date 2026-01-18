@@ -2,12 +2,16 @@ package client
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
+	"strings"
 	"time"
+
+	"github.com/andybalholm/brotli"
 )
 
 // Client is an HTTP client for communicating with Blossom servers
@@ -80,6 +84,18 @@ func (c *Client) Upload(ctx context.Context, body io.Reader, contentType string,
 			log.Printf("[DEBUG] Client.Upload: failed to read response body: %v", err)
 		}
 		bodyBytes = nil
+	}
+
+	// Decompress if needed
+	contentEncoding := resp.Header.Get("Content-Encoding")
+	if contentEncoding != "" && bodyBytes != nil {
+		bodyBytes, err = decompressBody(bodyBytes, contentEncoding)
+		if err != nil {
+			if c.verbose {
+				log.Printf("[DEBUG] Client.Upload: failed to decompress response body (encoding=%s): %v", contentEncoding, err)
+			}
+			// Continue with original body if decompression fails
+		}
 	}
 
 	// Accept 200, 201, and 202 as success status codes
@@ -374,6 +390,18 @@ func (c *Client) Mirror(ctx context.Context, body io.Reader, contentType string,
 		bodyBytes = nil
 	}
 
+	// Decompress if needed
+	contentEncoding := resp.Header.Get("Content-Encoding")
+	if contentEncoding != "" && bodyBytes != nil {
+		bodyBytes, err = decompressBody(bodyBytes, contentEncoding)
+		if err != nil {
+			if c.verbose {
+				log.Printf("[DEBUG] Client.Mirror: failed to decompress response body (encoding=%s): %v", contentEncoding, err)
+			}
+			// Continue with original body if decompression fails
+		}
+	}
+
 	// Accept 200, 201, and 202 as success status codes
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusAccepted {
 		bodyStr := string(bodyBytes)
@@ -396,4 +424,37 @@ func (c *Client) Mirror(ctx context.Context, body io.Reader, contentType string,
 // UploadWithBody uploads using a byte slice body
 func (c *Client) UploadWithBody(ctx context.Context, body []byte, contentType string, headers map[string]string) ([]byte, error) {
 	return c.Upload(ctx, bytes.NewReader(body), contentType, headers)
+}
+
+// decompressBody decompresses the response body based on Content-Encoding header
+// Supports: br (brotli), gzip, deflate
+// Returns decompressed body or original body if decompression fails or encoding is not supported
+func decompressBody(bodyBytes []byte, contentEncoding string) ([]byte, error) {
+	encoding := strings.ToLower(strings.TrimSpace(contentEncoding))
+	
+	switch encoding {
+	case "br":
+		// Brotli decompression
+		reader := brotli.NewReader(bytes.NewReader(bodyBytes))
+		decompressed, err := io.ReadAll(reader)
+		if err != nil {
+			return nil, fmt.Errorf("brotli decompression failed: %w", err)
+		}
+		return decompressed, nil
+	case "gzip":
+		// Gzip decompression (though Go's http client should handle this automatically)
+		reader, err := gzip.NewReader(bytes.NewReader(bodyBytes))
+		if err != nil {
+			return nil, fmt.Errorf("gzip reader creation failed: %w", err)
+		}
+		defer reader.Close()
+		decompressed, err := io.ReadAll(reader)
+		if err != nil {
+			return nil, fmt.Errorf("gzip decompression failed: %w", err)
+		}
+		return decompressed, nil
+	default:
+		// Unknown or unsupported encoding - return original body
+		return bodyBytes, nil
+	}
 }
