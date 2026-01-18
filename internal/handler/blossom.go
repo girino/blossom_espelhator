@@ -821,8 +821,9 @@ func (h *BlossomHandler) HandleDownload(w http.ResponseWriter, r *http.Request) 
 	path := strings.TrimPrefix(r.URL.Path, "/")
 
 	// Extract extension if present (e.g., /hash.png -> extension = ".png")
+	// The dot must be after the hash (at position 64 or later) to be considered an extension
 	var ext string
-	if lastDot := strings.LastIndex(path, "."); lastDot > 0 {
+	if lastDot := strings.LastIndex(path, "."); lastDot >= 64 {
 		// Extract everything after the last dot as extension
 		potentialExt := path[lastDot:]
 		// Validate it looks like a file extension (not too long, reasonable chars)
