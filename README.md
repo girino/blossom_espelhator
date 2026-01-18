@@ -138,7 +138,8 @@ upstream_servers:
 server:
   listen_addr: ":8080"             # Address to listen on
   min_upload_servers: 2            # Minimum servers that must succeed for upload
-  redirect_strategy: "round_robin" # Download server selection: "round_robin", "random", "health_based"
+  redirect_strategy: "round_robin" # Server selection strategy (see Redirect Strategies below)
+  base_url: ""                     # Base URL for local strategy (optional, see Redirect Strategies)
   timeout: 30s                     # Timeout for upstream requests
   max_retries: 3                   # Maximum retries for failed requests
   
@@ -150,10 +151,33 @@ server:
   max_memory_bytes: 536870912      # Maximum memory usage in bytes (512 MB) before marking system unhealthy
 ```
 
-### Server Capabilities
+### Redirect Strategies
 
-- `supports_mirror`: If `true`, the server supports BUD-04 `/mirror` endpoint (optional)
-- `supports_upload_head`: If `true`, the server supports BUD-06 `HEAD /upload` preflight checks (optional)
+The `redirect_strategy` option controls how the proxy selects upstream servers for downloads and response URLs:
+
+- **`round_robin`** (default): Cycles through available servers in order
+- **`random`**: Randomly selects from available servers
+- **`priority`**: Selects server with lowest priority number (lower is better). If multiple servers have the same priority, the first one found is selected
+- **`health_based`**: Groups servers by total failures (sum of upload, mirror, delete, and list failures), then uses round-robin within the group with the lowest failures. Servers with more failures are excluded from selection
+- **`local`**: Returns local URLs in response bodies (upload/mirror/list). Downloads still redirect to upstream servers using round-robin. Local URLs use format `base_url/sha256.ext` where:
+  - `base_url` is from config if set, otherwise derived from request
+  - Extension is derived from mime type or file extension, or omitted if unavailable
+
+### Base URL Configuration
+
+The `base_url` option (optional) is used when `redirect_strategy` is `"local"`:
+
+- If set, this URL is used for all local URL construction (e.g., `https://blossom.example.com`)
+- If not set or empty, base URL is derived from the request (scheme + host)
+- Useful for reverse proxy scenarios where you want to force a specific public URL
+- Only affects response URLs when using `"local"` strategy, does not affect download redirects
+
+### Server Configuration
+
+- `url`: The upstream server URL (required)
+- `priority`: Priority number for server selection when using `priority` strategy (lower is better, required)
+- `supports_mirror`: If `true`, the server supports BUD-04 `/mirror` endpoint (optional, defaults to `false`)
+- `supports_upload_head`: If `true`, the server supports BUD-06 `HEAD /upload` preflight checks (optional, defaults to `false`)
 
 ## Running
 
@@ -238,6 +262,7 @@ server:
   - Requires Nostr authentication (kind 24242 event)
   - Forwards to at least `min_upload_servers` upstream servers
   - Returns response with `nip94` array containing URLs and metadata
+  - If `redirect_strategy` is `"local"`, response URL uses local format (`base_url/sha256.ext`)
 
 - **HEAD /upload** - Upload preflight check (BUD-06)
   - Headers: `X-SHA-256`, `X-Content-Length`, `X-Content-Type`
@@ -247,15 +272,17 @@ server:
   - Request body: `{"url": "<blob-url>"}`
   - Only forwards to servers with `supports_mirror: true`
   - Returns response with `nip94` array
+  - If `redirect_strategy` is `"local"`, response URL uses local format (`base_url/sha256.ext`)
 
 - **GET /list/<pubkey>** - List files for a pubkey
   - Queries all upstream servers in parallel
   - Merges and deduplicates results based on `sha256`
   - Returns list with `nip94` tags for each item
+  - If `redirect_strategy` is `"local"`, item URLs use local format (`base_url/sha256.ext`)
 
 - **GET /<sha256>.<ext>** - Download file
   - Redirects to one of the upstream servers that has the file
-  - Uses configured redirect strategy (round_robin, random, health_based)
+  - Uses configured redirect strategy (round_robin, random, priority, health_based, or local with round-robin)
 
 - **HEAD /<sha256>.<ext>** - Check file existence
   - Proxies HEAD request to upstream server
