@@ -1,0 +1,47 @@
+version: '3.8'
+
+services:
+  blossom-espelhator:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: blossom-espelhator:latest
+    container_name: blossom-espelhator
+    restart: unless-stopped
+    ports:
+      - "7624:7624"
+    volumes:
+      # Mount config file (should be created from config.example.yaml)
+      - ./config/config.yaml:/app/config/config.yaml:ro
+    environment:
+      - TZ=UTC
+    labels:
+      # Label for autoheal to identify this container (project-specific)
+      - "blossom.espelhator.autoheal=true"
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+    networks:
+      - blossom-net
+
+  autoheal:
+    image: willfarrell/autoheal:latest
+    container_name: blossom-espelhator-autoheal
+    restart: unless-stopped
+    environment:
+      - AUTOHEAL_CONTAINER_LABEL=blossom.espelhator.autoheal=true
+      - AUTOHEAL_INTERVAL=5
+      - CURL_TIMEOUT=30
+      # Optional: Webhook URL to call on events (leave commented if not needed)
+      # - WEBHOOK_URL=https://example.com/webhook
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks:
+      - blossom-net
+
+networks:
+  blossom-net:
+    driver: bridge
