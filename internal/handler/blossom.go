@@ -145,6 +145,18 @@ func New(upstreamManager *upstream.Manager, cache *cache.Cache, statsTracker *st
 	}
 }
 
+// setCORSHeaders sets CORS headers on the response
+func setCORSHeaders(w http.ResponseWriter, r *http.Request) {
+	origin := r.Header.Get("Origin")
+	if origin != "" {
+		w.Header().Set("Access-Control-Allow-Origin", origin)
+	} else {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+	}
+	w.Header().Set("Access-Control-Allow-Methods", "HEAD, PUT, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "authorization, x-content-length, x-content-type, x-sha-256, content-type")
+}
+
 // HandleUpload handles PUT /upload and HEAD /upload requests
 // HEAD /upload implements BUD-06: Upload requirements (preflight check)
 func (h *BlossomHandler) HandleUpload(w http.ResponseWriter, r *http.Request) {
@@ -157,6 +169,14 @@ func (h *BlossomHandler) HandleUpload(w http.ResponseWriter, r *http.Request) {
 	// Handle HEAD /upload (BUD-06: Upload requirements preflight check)
 	if r.Method == http.MethodHead {
 		h.handleUploadPreflight(w, r)
+		return
+	}
+
+	// Handle OPTIONS (CORS preflight)
+	if r.Method == http.MethodOptions {
+		setCORSHeaders(w, r)
+		w.Header().Set("Access-Control-Max-Age", "86400") // 24 hours
+		w.WriteHeader(http.StatusNoContent)
 		return
 	}
 
@@ -420,12 +440,14 @@ func (h *BlossomHandler) HandleUpload(w http.ResponseWriter, r *http.Request) {
 			log.Printf("[DEBUG] HandleUpload: failed to marshal response: %v", err)
 		}
 		// Fallback to original response
+		setCORSHeaders(w, r)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		w.Write(selectedServer.ResponseBody)
 		return
 	}
 
+	setCORSHeaders(w, r)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	w.Write(responseJSON)
