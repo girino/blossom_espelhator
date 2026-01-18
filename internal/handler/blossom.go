@@ -162,8 +162,66 @@ func (h *BlossomHandler) HandleUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Collect all URLs from all successful servers
-	altURLs := make([]string, 0)
+	// Collect all URLs from all successful servers and add as BUD-08 tags
+	// Also add NIP-94 tags: ["x", "<hash>"] and ["m", "<mime-type>"]
+
+	// Get existing nip94 tags or create new tags array
+	var tags []interface{}
+	if existingTags, ok := responseData["nip94"].([]interface{}); ok {
+		// Make a deep copy to avoid modifying the original
+		tags = make([]interface{}, 0, len(existingTags))
+		for _, tag := range existingTags {
+			if tagArray, ok := tag.([]interface{}); ok && len(tagArray) > 0 {
+				tags = append(tags, tagArray)
+			}
+		}
+	} else {
+		tags = make([]interface{}, 0)
+	}
+
+	// Helper function to check if a tag already exists (by type and value)
+	hasTag := func(tagType string, tagValue string) bool {
+		for _, tag := range tags {
+			if tagArray, ok := tag.([]interface{}); ok && len(tagArray) >= 2 {
+				if typeVal, ok := tagArray[0].(string); ok && typeVal == tagType {
+					if valueVal, ok := tagArray[1].(string); ok && valueVal == tagValue {
+						return true
+					}
+				}
+			}
+		}
+		return false
+	}
+
+	// Helper function to check if a tag type already exists (ignoring value)
+	hasTagType := func(tagType string) bool {
+		for _, tag := range tags {
+			if tagArray, ok := tag.([]interface{}); ok && len(tagArray) > 0 {
+				if typeVal, ok := tagArray[0].(string); ok && typeVal == tagType {
+					return true
+				}
+			}
+		}
+		return false
+	}
+
+	// Add NIP-94 hash tag ["x", "<hash>"] if not present
+	if hashStr != "" && !hasTag("x", hashStr) && !hasTagType("x") {
+		tags = append(tags, []interface{}{"x", hashStr})
+	}
+
+	// Add NIP-94 mime type tag ["m", "<mime-type>"] if not present
+	var contentType string
+	if r.Header.Get("Content-Type") != "" {
+		contentType = r.Header.Get("Content-Type")
+	} else if typeVal, ok := responseData["type"].(string); ok && typeVal != "" {
+		contentType = typeVal
+	}
+	if contentType != "" && !hasTagType("m") {
+		tags = append(tags, []interface{}{"m", contentType})
+	}
+
+	// Collect URLs from all successful servers
 	for _, srv := range successfulServers {
 		var srvData map[string]interface{}
 		if err := json.Unmarshal(srv.ResponseBody, &srvData); err != nil {
@@ -173,25 +231,27 @@ func (h *BlossomHandler) HandleUpload(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		if urlVal, ok := srvData["url"].(string); ok && urlVal != "" {
-			// Add URL if not already in altURLs
-			found := false
-			for _, altURL := range altURLs {
-				if altURL == urlVal {
-					found = true
-					break
-				}
-			}
-			if !found {
-				altURLs = append(altURLs, urlVal)
+			// Add URL tag if not already present (check exact duplicate)
+			if !hasTag("url", urlVal) {
+				tags = append(tags, []interface{}{"url", urlVal})
 			}
 		}
 	}
 
-	// Always add alturls field (even if empty or single URL)
-	responseData["alturls"] = altURLs
+	// Update nip94 in response
+	responseData["nip94"] = tags
 
 	if h.verbose {
-		log.Printf("[DEBUG] HandleUpload: added alturls with %d URLs: %v", len(altURLs), altURLs)
+		// Count url tags for logging
+		urlTagCount := 0
+		for _, tag := range tags {
+			if tagArray, ok := tag.([]interface{}); ok && len(tagArray) > 0 {
+				if typeVal, ok := tagArray[0].(string); ok && typeVal == "url" {
+					urlTagCount++
+				}
+			}
+		}
+		log.Printf("[DEBUG] HandleUpload: added tags - %d url tags (BUD-08), NIP-94 tags for hash and mime type", urlTagCount)
 	}
 
 	// Marshal and return the modified response
@@ -315,8 +375,70 @@ func (h *BlossomHandler) HandleMirror(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Collect all URLs from all successful servers
-	altURLs := make([]string, 0)
+	// Collect all URLs from all successful servers and add as BUD-08 tags
+	// Also add NIP-94 tags: ["x", "<hash>"] and ["m", "<mime-type>"]
+
+	// Get existing nip94 tags or create new tags array
+	var tags []interface{}
+	if existingTags, ok := responseData["nip94"].([]interface{}); ok {
+		// Make a deep copy to avoid modifying the original
+		tags = make([]interface{}, 0, len(existingTags))
+		for _, tag := range existingTags {
+			if tagArray, ok := tag.([]interface{}); ok && len(tagArray) > 0 {
+				tags = append(tags, tagArray)
+			}
+		}
+	} else {
+		tags = make([]interface{}, 0)
+	}
+
+	// Helper function to check if a tag already exists (by type and value)
+	hasTag := func(tagType string, tagValue string) bool {
+		for _, tag := range tags {
+			if tagArray, ok := tag.([]interface{}); ok && len(tagArray) >= 2 {
+				if typeVal, ok := tagArray[0].(string); ok && typeVal == tagType {
+					if valueVal, ok := tagArray[1].(string); ok && valueVal == tagValue {
+						return true
+					}
+				}
+			}
+		}
+		return false
+	}
+
+	// Helper function to check if a tag type already exists (ignoring value)
+	hasTagType := func(tagType string) bool {
+		for _, tag := range tags {
+			if tagArray, ok := tag.([]interface{}); ok && len(tagArray) > 0 {
+				if typeVal, ok := tagArray[0].(string); ok && typeVal == tagType {
+					return true
+				}
+			}
+		}
+		return false
+	}
+
+	// Add NIP-94 hash tag ["x", "<hash>"] if not present
+	var hashVal string
+	if hashStr, ok := responseData["hash"].(string); ok && hashStr != "" {
+		hashVal = hashStr
+	} else if sha256Val, ok := responseData["sha256"].(string); ok && sha256Val != "" {
+		hashVal = sha256Val
+	}
+	if hashVal != "" && !hasTag("x", hashVal) && !hasTagType("x") {
+		tags = append(tags, []interface{}{"x", hashVal})
+	}
+
+	// Add NIP-94 mime type tag ["m", "<mime-type>"] if not present
+	var mimeType string
+	if typeVal, ok := responseData["type"].(string); ok && typeVal != "" {
+		mimeType = typeVal
+	}
+	if mimeType != "" && !hasTagType("m") {
+		tags = append(tags, []interface{}{"m", mimeType})
+	}
+
+	// Collect URLs from all successful servers
 	for _, srv := range successfulServers {
 		var srvData map[string]interface{}
 		if err := json.Unmarshal(srv.ResponseBody, &srvData); err != nil {
@@ -326,25 +448,27 @@ func (h *BlossomHandler) HandleMirror(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		if urlVal, ok := srvData["url"].(string); ok && urlVal != "" {
-			// Add URL if not already in altURLs
-			found := false
-			for _, altURL := range altURLs {
-				if altURL == urlVal {
-					found = true
-					break
-				}
-			}
-			if !found {
-				altURLs = append(altURLs, urlVal)
+			// Add URL tag if not already present (check exact duplicate)
+			if !hasTag("url", urlVal) {
+				tags = append(tags, []interface{}{"url", urlVal})
 			}
 		}
 	}
 
-	// Always add alturls field (even if empty or single URL)
-	responseData["alturls"] = altURLs
+	// Update nip94 in response
+	responseData["nip94"] = tags
 
 	if h.verbose {
-		log.Printf("[DEBUG] HandleMirror: added alturls with %d URLs: %v", len(altURLs), altURLs)
+		// Count url tags for logging
+		urlTagCount := 0
+		for _, tag := range tags {
+			if tagArray, ok := tag.([]interface{}); ok && len(tagArray) > 0 {
+				if typeVal, ok := tagArray[0].(string); ok && typeVal == "url" {
+					urlTagCount++
+				}
+			}
+		}
+		log.Printf("[DEBUG] HandleMirror: added tags - %d url tags (BUD-08), NIP-94 tags for hash and mime type", urlTagCount)
 	}
 
 	// Marshal and return the modified response

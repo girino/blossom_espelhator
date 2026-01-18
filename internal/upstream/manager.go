@@ -885,20 +885,69 @@ func (m *Manager) ListParallel(ctx context.Context, pubkey string) ([]map[string
 			}
 		}
 
-		// Collect all URLs from all servers for this sha256
-		altURLs := make([]string, 0)
-		for _, item := range items {
-			if urlVal, ok := item.Item["url"].(string); ok && urlVal != "" {
-				// Add URL if not already in altURLs
-				found := false
-				for _, altURL := range altURLs {
-					if altURL == urlVal {
-						found = true
-						break
+		// Collect all URLs from all servers for this sha256 and add as BUD-08 tags
+		// Also add NIP-94 tags: ["x", "<hash>"] and ["m", "<mime-type>"]
+
+		// Get existing nip94 tags from selected item or create new tags array
+		var tags []interface{}
+		if existingTags, ok := selected["nip94"].([]interface{}); ok {
+			// Make a deep copy to avoid modifying the original
+			tags = make([]interface{}, 0, len(existingTags))
+			for _, tag := range existingTags {
+				if tagArray, ok := tag.([]interface{}); ok && len(tagArray) > 0 {
+					tags = append(tags, tagArray)
+				}
+			}
+		} else {
+			tags = make([]interface{}, 0)
+		}
+
+		// Helper function to check if a tag already exists (by type and value)
+		hasTag := func(tagType string, tagValue string) bool {
+			for _, tag := range tags {
+				if tagArray, ok := tag.([]interface{}); ok && len(tagArray) >= 2 {
+					if typeVal, ok := tagArray[0].(string); ok && typeVal == tagType {
+						if valueVal, ok := tagArray[1].(string); ok && valueVal == tagValue {
+							return true
+						}
 					}
 				}
-				if !found {
-					altURLs = append(altURLs, urlVal)
+			}
+			return false
+		}
+
+		// Helper function to check if a tag type already exists (ignoring value)
+		hasTagType := func(tagType string) bool {
+			for _, tag := range tags {
+				if tagArray, ok := tag.([]interface{}); ok && len(tagArray) > 0 {
+					if typeVal, ok := tagArray[0].(string); ok && typeVal == tagType {
+						return true
+					}
+				}
+			}
+			return false
+		}
+
+		// Add NIP-94 hash tag ["x", "<hash>"] if not present
+		if sha256Val != "" && !hasTag("x", sha256Val) && !hasTagType("x") {
+			tags = append(tags, []interface{}{"x", sha256Val})
+		}
+
+		// Add NIP-94 mime type tag ["m", "<mime-type>"] if not present
+		var mimeType string
+		if typeVal, ok := selected["type"].(string); ok && typeVal != "" {
+			mimeType = typeVal
+		}
+		if mimeType != "" && !hasTagType("m") {
+			tags = append(tags, []interface{}{"m", mimeType})
+		}
+
+		// Collect URLs from all servers for this sha256
+		for _, item := range items {
+			if urlVal, ok := item.Item["url"].(string); ok && urlVal != "" {
+				// Add URL tag if not already present (check exact duplicate)
+				if !hasTag("url", urlVal) {
+					tags = append(tags, []interface{}{"url", urlVal})
 				}
 			}
 		}
@@ -909,11 +958,20 @@ func (m *Manager) ListParallel(ctx context.Context, pubkey string) ([]map[string
 			resultItem[k] = v
 		}
 
-		// Always add alturls field (even if empty or single URL)
-		resultItem["alturls"] = altURLs
+		// Update nip94 in result item (BUD-08 + NIP-94)
+		resultItem["nip94"] = tags
 
 		if m.verbose {
-			log.Printf("[DEBUG] ListParallel: sha256 %s - added alturls with %d URLs: %v", sha256Val, len(altURLs), altURLs)
+			// Count url tags for logging
+			urlTagCount := 0
+			for _, tag := range tags {
+				if tagArray, ok := tag.([]interface{}); ok && len(tagArray) > 0 {
+					if typeVal, ok := tagArray[0].(string); ok && typeVal == "url" {
+						urlTagCount++
+					}
+				}
+			}
+			log.Printf("[DEBUG] ListParallel: sha256 %s - added tags - %d url tags (BUD-08), NIP-94 tags for hash and mime type", sha256Val, urlTagCount)
 		}
 
 		merged = append(merged, resultItem)
