@@ -434,10 +434,12 @@ func (h *BlossomHandler) HandleHome(w http.ResponseWriter, r *http.Request) {
 	isHealthy := memoryHealthy && goroutinesHealthy && serversHealthy
 
 	// Get server address from request
-	serverAddress := "http://" + r.Host
-	if r.TLS != nil {
-		serverAddress = "https://" + r.Host
+	// Check X-Forwarded-Proto header for reverse proxy scenarios (Cloudflare, etc.)
+	scheme := "http"
+	if r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https" {
+		scheme = "https"
 	}
+	serverAddress := scheme + "://" + r.Host
 
 	// Calculate totals
 	var totalUploads, totalDownloads, totalMirrors, totalDeletes, totalLists int64
