@@ -6,7 +6,7 @@ services:
     container_name: blossom-espelhator-nginx
     restart: unless-stopped
     ports:
-      - "80:80"
+      - "7624:7624"
       # Uncomment for HTTPS (requires SSL certificates)
       # - "443:443"
     volumes:
