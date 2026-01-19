@@ -530,14 +530,20 @@ func (h *BlossomHandler) HandleMirror(w http.ResponseWriter, r *http.Request) {
 	successfulServers, err := h.upstreamManager.MirrorParallel(r.Context(), bodyReader, r.Header.Get("Content-Type"), headers)
 
 	// Track stats for mirror operations
+	// Get all mirror-capable servers (only these are attempted by MirrorParallel)
+	mirrorCapableServers := h.upstreamManager.GetMirrorCapableServers()
 	successfulURLs := make(map[string]bool)
 	for _, srv := range successfulServers {
 		successfulURLs[srv.ServerURL] = true
 		h.stats.RecordSuccess(srv.ServerURL, "mirror")
 	}
 	// Track failures for mirror-capable servers that didn't succeed
-	// Note: Only track failures for servers that actually attempted the mirror
-	// MirrorParallel only attempts servers with mirror capability, so we can't track all servers here
+	// Only track failures for servers that actually attempted the mirror
+	for _, serverURL := range mirrorCapableServers {
+		if !successfulURLs[serverURL] {
+			h.stats.RecordFailure(serverURL, "mirror")
+		}
+	}
 
 	if err != nil {
 		if h.verbose {

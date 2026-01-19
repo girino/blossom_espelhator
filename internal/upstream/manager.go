@@ -693,6 +693,17 @@ func (m *Manager) GetServerURLs() []string {
 	return m.serverURLs
 }
 
+// GetMirrorCapableServers returns a list of server URLs that support mirroring
+func (m *Manager) GetMirrorCapableServers() []string {
+	mirrorCapableServers := make([]string, 0)
+	for i, cap := range m.serverCapabilities {
+		if cap.SupportsMirror {
+			mirrorCapableServers = append(mirrorCapableServers, m.serverURLs[i])
+		}
+	}
+	return mirrorCapableServers
+}
+
 // CheckHashOnServers checks all upstream servers in parallel to see which ones have the blob
 // Returns list of server URLs that have the blob
 func (m *Manager) CheckHashOnServers(ctx context.Context, hash string) []string {
