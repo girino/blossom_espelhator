@@ -18,7 +18,8 @@ import (
 
 // Manager manages upstream Blossom servers
 type Manager struct {
-	clients            []*client.Client
+	clients            []*client.Client  // Clients for download/HEAD/DELETE (regular timeout)
+	uploadClients      []*client.Client  // Clients for uploads (longer timeout for large files)
 	serverURLs         []string
 	serverPriorities   []int                // Priority for each server (indexed same as clients/serverURLs)
 	serverCapabilities []serverCapabilities // Capabilities for each server (indexed same as clients/serverURLs)
@@ -26,7 +27,8 @@ type Manager struct {
 	redirectStrategy   string
 	roundRobinIndex    int
 	roundRobinMutex    sync.Mutex
-	timeout            time.Duration
+	timeout            time.Duration      // Timeout for download/HEAD/DELETE requests
+	uploadTimeout      time.Duration      // Timeout for upload requests (should be longer for large files)
 	verbose            bool
 	getTotalFailures   func(string) int64 // Function to get total failures for a server (for health_based strategy)
 }
@@ -63,13 +65,20 @@ func New(cfg *config.Config, verbose bool) (*Manager, error) {
 	}
 
 	clients := make([]*client.Client, 0, len(cfg.UpstreamServers))
+	uploadClients := make([]*client.Client, 0, len(cfg.UpstreamServers))
 	serverURLs := make([]string, 0, len(cfg.UpstreamServers))
 	serverPriorities := make([]int, 0, len(cfg.UpstreamServers))
 	capabilities := make([]serverCapabilities, 0, len(cfg.UpstreamServers))
 
 	for _, server := range cfg.UpstreamServers {
+		// Create clients with regular timeout for download/HEAD/DELETE
 		cl := client.New(server.URL, cfg.Server.Timeout, verbose)
 		clients = append(clients, cl)
+		
+		// Create separate clients with upload timeout for uploads
+		uploadCl := client.New(server.URL, cfg.Server.UploadTimeout, verbose)
+		uploadClients = append(uploadClients, uploadCl)
+		
 		serverURLs = append(serverURLs, server.URL)
 		serverPriorities = append(serverPriorities, server.Priority)
 
@@ -92,12 +101,14 @@ func New(cfg *config.Config, verbose bool) (*Manager, error) {
 
 	return &Manager{
 		clients:            clients,
+		uploadClients:      uploadClients,
 		serverURLs:         serverURLs,
 		serverPriorities:   serverPriorities,
 		serverCapabilities: capabilities,
 		minUploadServers:   cfg.Server.MinUploadServers,
 		redirectStrategy:   cfg.Server.RedirectStrategy,
 		timeout:            cfg.Server.Timeout,
+		uploadTimeout:      cfg.Server.UploadTimeout,
 		verbose:            verbose,
 		getTotalFailures:   nil, // Will be set via SetFailureGetter if needed
 	}, nil
@@ -122,8 +133,8 @@ func (m *Manager) UploadParallel(ctx context.Context, body io.Reader, contentTyp
 		log.Printf("[DEBUG] UploadParallel: content-type=%s, headers=%v", contentType, headers)
 	}
 
-	// Create a context with timeout
-	uploadCtx, cancel := context.WithTimeout(ctx, m.timeout)
+	// Create a context with upload timeout (longer than regular timeout for large files)
+	uploadCtx, cancel := context.WithTimeout(ctx, m.uploadTimeout)
 	defer cancel()
 
 	// Channel to collect results
@@ -141,7 +152,7 @@ func (m *Manager) UploadParallel(ctx context.Context, body io.Reader, contentTyp
 
 	// Launch parallel uploads
 	var wg sync.WaitGroup
-	for i, cl := range m.clients {
+	for i, cl := range m.uploadClients {
 		wg.Add(1)
 		go func(idx int, c *client.Client, url string) {
 			defer wg.Done()

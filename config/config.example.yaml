@@ -49,8 +49,14 @@ server:
   # Note: Only affects response URLs when redirect_strategy is "local", does not affect redirects
   base_url: ""
   
-  # Timeout for upstream server requests
+  # Timeout for upstream server requests (download/HEAD/DELETE operations)
   timeout: 30s
+  
+  # Timeout for upload requests (should be longer for large file uploads)
+  # Default: 5m (5 minutes) if not specified
+  # Recommended: Set based on your largest expected file size and upload speed
+  # Example: For 100MB uploads at 10MB/s, use at least 20s, but add buffer for network variability
+  upload_timeout: 5m
   
   # Maximum number of retries for failed requests
   max_retries: 3
