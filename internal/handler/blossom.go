@@ -209,29 +209,6 @@ func (h *BlossomHandler) HandleUpload(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Read the request body
-	bodyBytes, err := io.ReadAll(r.Body)
-	if err != nil {
-		if h.verbose {
-			log.Printf("[DEBUG] HandleUpload: failed to read body: %v", err)
-		}
-		http.Error(w, fmt.Sprintf("Failed to read request body: %v", err), http.StatusBadRequest)
-		return
-	}
-	defer r.Body.Close()
-
-	if h.verbose {
-		log.Printf("[DEBUG] HandleUpload: read %d bytes from request body", len(bodyBytes))
-	}
-
-	// Calculate SHA256 hash
-	hash := sha256.Sum256(bodyBytes)
-	hashStr := hex.EncodeToString(hash[:])
-
-	if h.verbose {
-		log.Printf("[DEBUG] HandleUpload: calculated hash: %s", hashStr)
-	}
-
 	// Copy headers from original request (for Nostr event, etc.)
 	headers := make(map[string]string)
 	for k, v := range r.Header {
@@ -250,9 +227,40 @@ func (h *BlossomHandler) HandleUpload(w http.ResponseWriter, r *http.Request) {
 		log.Printf("[DEBUG] HandleUpload: forwarding headers: %v", headers)
 	}
 
-	// Forward upload to upstream servers
-	bodyReader := bytes.NewReader(bodyBytes)
-	successfulServers, err := h.upstreamManager.UploadParallel(r.Context(), bodyReader, r.Header.Get("Content-Type"), headers)
+	// Stream upload to upstream servers while calculating hash in parallel
+	// This avoids reading the entire file into memory and starting uploads earlier
+	// to prevent auth header expiration on large files
+	hashWriter := sha256.New()
+	teeReader := io.TeeReader(r.Body, hashWriter)
+
+	// Ensure body is closed after streaming completes
+	defer func() {
+		// Ensure we consume any remaining body data to prevent connection issues
+		if r.Body != nil {
+			r.Body.Close()
+		}
+	}()
+
+	// Stream the upload - this will consume the entire body
+	successfulServers, err := h.upstreamManager.UploadParallelStreaming(r.Context(), teeReader, r.Header.Get("Content-Type"), headers)
+	
+	// IMPORTANT: Ensure the entire request body is consumed before responding
+	// This prevents the client connection from being closed prematurely
+	// The teeReader should have consumed everything, but we double-check by draining
+	// any remaining data to prevent connection issues
+	if r.Body != nil {
+		// Drain any remaining body (should be none, but this is defensive)
+		io.Copy(io.Discard, r.Body)
+	}
+
+	// Calculate hash from the hash writer
+	// Note: The hash is calculated as data streams through teeReader
+	hash := hashWriter.Sum(nil)
+	hashStr := hex.EncodeToString(hash)
+
+	if h.verbose {
+		log.Printf("[DEBUG] HandleUpload: calculated hash: %s", hashStr)
+	}
 
 	// Track stats for all attempted servers (successful and failed)
 	// Get all upstream server URLs to track failures

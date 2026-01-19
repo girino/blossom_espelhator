@@ -16,10 +16,56 @@ import (
 	"github.com/girino/blossom_espelhator/internal/config"
 )
 
+// errorTolerantWriter wraps a pipe writer and continues writing even if errors occur
+// It tracks errors separately so we can detect which pipes failed
+type errorTolerantWriter struct {
+	w      *io.PipeWriter
+	err    error
+	mu     sync.Mutex
+	name   string // for debugging
+	closed bool
+}
+
+func (ew *errorTolerantWriter) Write(p []byte) (int, error) {
+	ew.mu.Lock()
+	defer ew.mu.Unlock()
+
+	if ew.err != nil || ew.closed {
+		// Already errored or closed, skip writes but return success to keep MultiWriter happy
+		return len(p), nil
+	}
+
+	n, err := ew.w.Write(p)
+	if err != nil {
+		ew.err = err
+		ew.closed = true
+		// Close the writer to signal EOF to the reader, but don't propagate the error
+		ew.w.CloseWithError(err)
+		return n, nil // Return success but store error
+	}
+	return n, nil
+}
+
+func (ew *errorTolerantWriter) GetError() error {
+	ew.mu.Lock()
+	defer ew.mu.Unlock()
+	return ew.err
+}
+
+func (ew *errorTolerantWriter) Close() error {
+	ew.mu.Lock()
+	defer ew.mu.Unlock()
+	if !ew.closed && ew.w != nil {
+		ew.closed = true
+		return ew.w.Close()
+	}
+	return nil
+}
+
 // Manager manages upstream Blossom servers
 type Manager struct {
-	clients            []*client.Client  // Clients for download/HEAD/DELETE (regular timeout)
-	uploadClients      []*client.Client  // Clients for uploads (longer timeout for large files)
+	clients            []*client.Client // Clients for download/HEAD/DELETE (regular timeout)
+	uploadClients      []*client.Client // Clients for uploads (longer timeout for large files)
 	serverURLs         []string
 	serverPriorities   []int                // Priority for each server (indexed same as clients/serverURLs)
 	serverCapabilities []serverCapabilities // Capabilities for each server (indexed same as clients/serverURLs)
@@ -27,8 +73,8 @@ type Manager struct {
 	redirectStrategy   string
 	roundRobinIndex    int
 	roundRobinMutex    sync.Mutex
-	timeout            time.Duration      // Timeout for download/HEAD/DELETE requests
-	uploadTimeout      time.Duration      // Timeout for upload requests (should be longer for large files)
+	timeout            time.Duration // Timeout for download/HEAD/DELETE requests
+	uploadTimeout      time.Duration // Timeout for upload requests (should be longer for large files)
 	verbose            bool
 	getTotalFailures   func(string) int64 // Function to get total failures for a server (for health_based strategy)
 }
@@ -74,11 +120,11 @@ func New(cfg *config.Config, verbose bool) (*Manager, error) {
 		// Create clients with regular timeout for download/HEAD/DELETE
 		cl := client.New(server.URL, cfg.Server.Timeout, verbose)
 		clients = append(clients, cl)
-		
+
 		// Create separate clients with upload timeout for uploads
 		uploadCl := client.New(server.URL, cfg.Server.UploadTimeout, verbose)
 		uploadClients = append(uploadClients, uploadCl)
-		
+
 		serverURLs = append(serverURLs, server.URL)
 		serverPriorities = append(serverPriorities, server.Priority)
 
@@ -262,6 +308,222 @@ func (m *Manager) UploadParallel(ctx context.Context, body io.Reader, contentTyp
 
 	if m.verbose {
 		log.Printf("[DEBUG] UploadParallel: upload successful, minimum requirement met (%d >= %d)", len(successfulServers), m.minUploadServers)
+	}
+
+	return successfulServers, nil
+}
+
+// UploadParallelStreaming streams a blob to multiple upstream servers in parallel
+// Unlike UploadParallel, this method streams the body directly without buffering it first
+// This allows uploads to start immediately, preventing auth header expiration on large files
+// Returns the list of successful servers with their response bodies and an error if fewer than minUploadServers succeeded
+func (m *Manager) UploadParallelStreaming(ctx context.Context, body io.Reader, contentType string, headers map[string]string) ([]UploadResultWithResponse, error) {
+	if m.verbose {
+		log.Printf("[DEBUG] UploadParallelStreaming: starting streaming parallel upload to %d servers", len(m.uploadClients))
+		log.Printf("[DEBUG] UploadParallelStreaming: content-type=%s, headers=%v", contentType, headers)
+	}
+
+	// Create a context with upload timeout (longer than regular timeout for large files)
+	uploadCtx, cancel := context.WithTimeout(ctx, m.uploadTimeout)
+	defer cancel()
+
+	// Create pipes for each upstream server
+	type pipeData struct {
+		reader *io.PipeReader
+		writer *io.PipeWriter
+	}
+	pipes := make([]pipeData, len(m.uploadClients))
+	for i := range pipes {
+		pipes[i].reader, pipes[i].writer = io.Pipe()
+	}
+
+	// Channel to collect results
+	resultChan := make(chan UploadResult, len(m.uploadClients))
+
+	// Launch parallel uploads - each one reads from its pipe
+	var wg sync.WaitGroup
+	for i, cl := range m.uploadClients {
+		wg.Add(1)
+		go func(idx int, c *client.Client, url string, pipeReader *io.PipeReader) {
+			defer wg.Done()
+			defer pipeReader.Close()
+
+			if m.verbose {
+				log.Printf("[DEBUG] UploadParallelStreaming: starting upload to server %d: %s", idx+1, url)
+			}
+
+			uploadStart := time.Now()
+			responseBody, err := c.Upload(uploadCtx, pipeReader, contentType, headers)
+			uploadDuration := time.Since(uploadStart)
+
+			statusCode := 0
+			if err != nil {
+				if httpErr, ok := err.(*client.HTTPError); ok {
+					statusCode = httpErr.StatusCode
+				}
+			}
+
+			result := UploadResult{
+				ServerURL:    url,
+				Success:      err == nil,
+				Error:        err,
+				StatusCode:   statusCode,
+				ResponseBody: responseBody,
+			}
+
+			if m.verbose {
+				if err == nil {
+					log.Printf("[DEBUG] UploadParallelStreaming: server %d (%s) succeeded in %v", idx+1, url, uploadDuration)
+				} else {
+					log.Printf("[DEBUG] UploadParallelStreaming: server %d (%s) failed in %v: %v", idx+1, url, uploadDuration, err)
+				}
+			}
+
+			resultChan <- result
+		}(i, cl, m.serverURLs[i], pipes[i].reader)
+	}
+
+	// Stream data from body to all pipes using MultiWriter with error-tolerant writers
+	// This allows writing to continue even if one pipe fails
+	streamErr := make(chan error, 1)
+	errorTolerantWriters := make([]*errorTolerantWriter, len(pipes))
+	go func() {
+		defer func() {
+			// Note: Individual writers are closed by errorTolerantWriter.Close()
+			// Only close pipes that weren't handled by errorTolerantWriter
+			for i, p := range pipes {
+				if p.writer != nil && (errorTolerantWriters[i] == nil || errorTolerantWriters[i].GetError() == nil) {
+					// Close any pipes not already closed by errorTolerantWriter
+					if err := p.writer.Close(); err != nil {
+						if m.verbose {
+							log.Printf("[DEBUG] UploadParallelStreaming: error closing pipe writer %d: %v", i+1, err)
+						}
+					}
+				}
+			}
+		}()
+
+		// Create error-tolerant writers for each pipe
+		writers := make([]io.Writer, 0, len(pipes))
+		for i, p := range pipes {
+			if p.writer != nil {
+				etw := &errorTolerantWriter{
+					w:    p.writer,
+					name: fmt.Sprintf("pipe-%d", i+1),
+				}
+				errorTolerantWriters[i] = etw
+				writers = append(writers, etw)
+			}
+		}
+		multiWriter := io.MultiWriter(writers...)
+
+		// Copy from body to all pipes simultaneously
+		// Even if one pipe fails, we continue writing to others
+		_, err := io.Copy(multiWriter, body)
+
+		// Close all writers after copying (even if some had errors)
+		for i, etw := range errorTolerantWriters {
+			if etw != nil {
+				pipeErr := etw.GetError()
+				if pipeErr != nil {
+					if m.verbose {
+						log.Printf("[DEBUG] UploadParallelStreaming: pipe writer %d (%s) had error during streaming: %v", i+1, etw.name, pipeErr)
+					}
+				} else {
+					// Only close if no error occurred (Close() will handle closed state)
+					etw.Close()
+				}
+			}
+		}
+
+		if err != nil {
+			streamErr <- fmt.Errorf("failed to stream body to pipes: %w", err)
+			return
+		}
+
+		streamErr <- nil
+	}()
+
+	// Wait for all uploads to complete
+	wg.Wait()
+	close(resultChan)
+
+	// Check for streaming errors
+	select {
+	case err := <-streamErr:
+		if err != nil {
+			if m.verbose {
+				log.Printf("[DEBUG] UploadParallelStreaming: streaming error: %v", err)
+			}
+			// Continue to process results even if streaming had errors
+		}
+	default:
+		// No error
+	}
+
+	// Collect successful uploads and errors
+	successfulServers := make([]UploadResultWithResponse, 0)
+	errorDetails := make([]string, 0)
+	allStatusCodes := make([]int, 0)
+
+	for result := range resultChan {
+		if result.Success {
+			successfulServers = append(successfulServers, UploadResultWithResponse{
+				ServerURL:    result.ServerURL,
+				ResponseBody: result.ResponseBody,
+			})
+		} else if result.Error != nil {
+			errorDetails = append(errorDetails, fmt.Sprintf("%s: %v", result.ServerURL, result.Error))
+
+			// Track all status codes from errors
+			if result.StatusCode > 0 {
+				allStatusCodes = append(allStatusCodes, result.StatusCode)
+			}
+		}
+	}
+
+	// Check if we have enough successful uploads
+	if m.verbose {
+		log.Printf("[DEBUG] UploadParallelStreaming: completed - %d succeeded, %d failed", len(successfulServers), len(errorDetails))
+		if len(successfulServers) > 0 {
+			log.Printf("[DEBUG] UploadParallelStreaming: successful servers: %v", successfulServers)
+		}
+		if len(errorDetails) > 0 {
+			log.Printf("[DEBUG] UploadParallelStreaming: failed servers: %v", errorDetails)
+		}
+	}
+
+	if len(successfulServers) < m.minUploadServers {
+		errMsg := fmt.Sprintf("only %d servers succeeded, need at least %d", len(successfulServers), m.minUploadServers)
+		if len(errorDetails) > 0 {
+			errMsg += fmt.Sprintf(". Errors: %v", errorDetails)
+		}
+
+		// If we have status codes from upstream errors, use the lowest one
+		if len(allStatusCodes) > 0 {
+			// Find the lowest status code
+			minStatusCode := allStatusCodes[0]
+			for _, code := range allStatusCodes[1:] {
+				if code < minStatusCode {
+					minStatusCode = code
+				}
+			}
+
+			if m.verbose {
+				log.Printf("[DEBUG] UploadParallelStreaming: using lowest upstream status code %d (from %v)", minStatusCode, allStatusCodes)
+			}
+			return successfulServers, &UploadError{
+				StatusCode: minStatusCode,
+				Message:    errMsg,
+			}
+		}
+
+		// No status codes available - return 500
+		return successfulServers, fmt.Errorf("%s", errMsg)
+	}
+
+	if m.verbose {
+		log.Printf("[DEBUG] UploadParallelStreaming: upload successful, minimum requirement met (%d >= %d)", len(successfulServers), m.minUploadServers)
 	}
 
 	return successfulServers, nil
