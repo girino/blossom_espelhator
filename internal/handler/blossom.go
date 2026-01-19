@@ -241,22 +241,29 @@ func (h *BlossomHandler) HandleUpload(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
-	// Stream the upload - this will consume the entire body
+	// Stream the upload - this will consume the entire body via teeReader
+	// teeReader will read from r.Body and write to hashWriter while also
+	// providing data to the streaming upload
+	// IMPORTANT: teeReader writes to hashWriter as it reads from r.Body,
+	// so the hash is calculated during the streaming process
 	successfulServers, err := h.upstreamManager.UploadParallelStreaming(r.Context(), teeReader, r.Header.Get("Content-Type"), headers)
-	
-	// IMPORTANT: Ensure the entire request body is consumed before responding
-	// This prevents the client connection from being closed prematurely
-	// The teeReader should have consumed everything, but we double-check by draining
-	// any remaining data to prevent connection issues
-	if r.Body != nil {
-		// Drain any remaining body (should be none, but this is defensive)
-		io.Copy(io.Discard, r.Body)
-	}
+
+	// IMPORTANT: Do NOT drain r.Body again here!
+	// teeReader has already consumed r.Body completely when UploadParallelStreaming returns.
+	// If we try to read from r.Body again, we'll get no data or EOF, which doesn't affect
+	// the hash (which was already calculated), but it's unnecessary.
 
 	// Calculate hash from the hash writer
 	// Note: The hash is calculated as data streams through teeReader
+	// All data from r.Body should have been written to hashWriter by teeReader
+	// when io.Copy completes in UploadParallelStreaming
 	hash := hashWriter.Sum(nil)
 	hashStr := hex.EncodeToString(hash)
+
+	if h.verbose {
+		// Debug: log the hash length to verify it's complete
+		log.Printf("[DEBUG] HandleUpload: hash length: %d bytes, hex string length: %d chars", len(hash), len(hashStr))
+	}
 
 	if h.verbose {
 		log.Printf("[DEBUG] HandleUpload: calculated hash: %s", hashStr)

@@ -32,17 +32,26 @@ func (ew *errorTolerantWriter) Write(p []byte) (int, error) {
 
 	if ew.err != nil || ew.closed {
 		// Already errored or closed, skip writes but return success to keep MultiWriter happy
+		// This ensures io.Copy continues even if one pipe fails
 		return len(p), nil
 	}
 
+	// Attempt to write to the pipe
 	n, err := ew.w.Write(p)
 	if err != nil {
+		// If write fails (e.g., pipe closed), mark as errored and close
 		ew.err = err
 		ew.closed = true
 		// Close the writer to signal EOF to the reader, but don't propagate the error
-		ew.w.CloseWithError(err)
-		return n, nil // Return success but store error
+		// to io.MultiWriter so it continues writing to other pipes
+		if ew.w != nil {
+			ew.w.CloseWithError(err)
+		}
+		// Return success with bytes written (even if it was partial) to keep MultiWriter happy
+		// This allows io.Copy to continue reading and writing to other pipes
+		return len(p), nil
 	}
+	// Success - return number of bytes written and no error
 	return n, nil
 }
 
@@ -419,7 +428,12 @@ func (m *Manager) UploadParallelStreaming(ctx context.Context, body io.Reader, c
 
 		// Copy from body to all pipes simultaneously
 		// Even if one pipe fails, we continue writing to others
-		_, err := io.Copy(multiWriter, body)
+		// IMPORTANT: io.Copy must read ALL data from body to ensure complete hash calculation
+		// The body is a teeReader that writes to hashWriter as it reads from r.Body
+		copied, err := io.Copy(multiWriter, body)
+		if m.verbose {
+			log.Printf("[DEBUG] UploadParallelStreaming: copied %d bytes from body to pipes (hash should be complete after this)", copied)
+		}
 
 		// Close all writers after copying (even if some had errors)
 		for i, etw := range errorTolerantWriters {
