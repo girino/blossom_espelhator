@@ -1,6 +1,26 @@
 version: '3.8'
 
 services:
+  nginx:
+    image: nginx:alpine
+    container_name: blossom-espelhator-nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      # Uncomment for HTTPS (requires SSL certificates)
+      # - "443:443"
+    volumes:
+      # Mount nginx configuration
+      - ./config/nginx.conf:/etc/nginx/nginx.conf:ro
+      # Optional: Mount SSL certificates for HTTPS
+      # - ./config/ssl:/etc/nginx/ssl:ro
+    depends_on:
+      - blossom-espelhator
+    networks:
+      - blossom-net
+    labels:
+      - "blossom.espelhator.service=nginx"
+
   blossom-espelhator:
     build:
       context: .
@@ -9,8 +29,9 @@ services:
     container_name: blossom-espelhator
     restart: unless-stopped
     command: ["./blossom_espelhator", "-config", "/app/config/config.yaml", "-v"]
-    ports:
-      - "7624:7624"
+    # No longer exposing port directly - accessed via nginx
+    # ports:
+    #   - "7624:7624"
     volumes:
       # Mount config file (should be created from config.example.yaml)
       - ./config/config.yaml:/app/config/config.yaml:ro
