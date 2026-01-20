@@ -10,6 +10,7 @@ import (
 	"log"
 	"net/http"
 	"runtime"
+	"strconv"
 	"strings"
 
 	"github.com/girino/blossom_espelhator/internal/auth"
@@ -214,12 +215,29 @@ func (h *BlossomHandler) HandleUpload(w http.ResponseWriter, r *http.Request) {
 	for k, v := range r.Header {
 		// Skip certain headers that shouldn't be forwarded
 		// Also skip Accept-Encoding since we control it explicitly in the client
+		// Content-Length is handled separately to ensure it's set correctly for streaming
 		lowerKey := strings.ToLower(k)
 		if lowerKey == "host" || lowerKey == "content-length" || lowerKey == "accept-encoding" {
 			continue
 		}
 		if len(v) > 0 {
 			headers[k] = v[0]
+		}
+	}
+
+	// Extract Content-Length from original request
+	// This is needed because when using io.Reader with http.NewRequest,
+	// Go will use chunked transfer encoding unless Content-Length is explicitly set
+	// Some upstream servers require Content-Length and reject chunked encoding
+	var contentLength int64 = -1
+	if clStr := r.Header.Get("Content-Length"); clStr != "" {
+		if cl, err := strconv.ParseInt(clStr, 10, 64); err == nil {
+			contentLength = cl
+			if h.verbose {
+				log.Printf("[DEBUG] HandleUpload: extracted Content-Length from request: %d", contentLength)
+			}
+		} else if h.verbose {
+			log.Printf("[DEBUG] HandleUpload: failed to parse Content-Length '%s': %v", clStr, err)
 		}
 	}
 
@@ -246,7 +264,7 @@ func (h *BlossomHandler) HandleUpload(w http.ResponseWriter, r *http.Request) {
 	// providing data to the streaming upload
 	// IMPORTANT: teeReader writes to hashWriter as it reads from r.Body,
 	// so the hash is calculated during the streaming process
-	successfulServers, err := h.upstreamManager.UploadParallelStreaming(r.Context(), teeReader, r.Header.Get("Content-Type"), headers)
+	successfulServers, err := h.upstreamManager.UploadParallelStreaming(r.Context(), teeReader, r.Header.Get("Content-Type"), contentLength, headers)
 
 	// IMPORTANT: Do NOT drain r.Body again here!
 	// teeReader has already consumed r.Body completely when UploadParallelStreaming returns.

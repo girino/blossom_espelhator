@@ -220,7 +220,7 @@ func (m *Manager) UploadParallel(ctx context.Context, body io.Reader, contentTyp
 			reader := bytes.NewReader(bodyBytes)
 
 			uploadStart := time.Now()
-			responseBody, err := c.Upload(uploadCtx, reader, contentType, headers)
+			responseBody, err := c.Upload(uploadCtx, reader, contentType, int64(len(bodyBytes)), headers)
 			uploadDuration := time.Since(uploadStart)
 
 			statusCode := 0
@@ -325,8 +325,9 @@ func (m *Manager) UploadParallel(ctx context.Context, body io.Reader, contentTyp
 // UploadParallelStreaming streams a blob to multiple upstream servers in parallel
 // Unlike UploadParallel, this method streams the body directly without buffering it first
 // This allows uploads to start immediately, preventing auth header expiration on large files
+// contentLength should be set if known (>= 0), otherwise -1 to use chunked encoding
 // Returns the list of successful servers with their response bodies and an error if fewer than minUploadServers succeeded
-func (m *Manager) UploadParallelStreaming(ctx context.Context, body io.Reader, contentType string, headers map[string]string) ([]UploadResultWithResponse, error) {
+func (m *Manager) UploadParallelStreaming(ctx context.Context, body io.Reader, contentType string, contentLength int64, headers map[string]string) ([]UploadResultWithResponse, error) {
 	if m.verbose {
 		log.Printf("[DEBUG] UploadParallelStreaming: starting streaming parallel upload to %d servers", len(m.uploadClients))
 		log.Printf("[DEBUG] UploadParallelStreaming: content-type=%s, headers=%v", contentType, headers)
@@ -362,7 +363,7 @@ func (m *Manager) UploadParallelStreaming(ctx context.Context, body io.Reader, c
 			}
 
 			uploadStart := time.Now()
-			responseBody, err := c.Upload(uploadCtx, pipeReader, contentType, headers)
+			responseBody, err := c.Upload(uploadCtx, pipeReader, contentType, contentLength, headers)
 			uploadDuration := time.Since(uploadStart)
 
 			statusCode := 0

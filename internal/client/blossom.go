@@ -31,18 +31,28 @@ func New(baseURL string, timeout time.Duration, verbose bool) *Client {
 
 // Upload uploads a blob to the Blossom server
 // The request should include the file data and Nostr event in the body
+// contentLength should be set if known (>= 0), otherwise -1 to use chunked encoding
 // Returns the response body on success
-func (c *Client) Upload(ctx context.Context, body io.Reader, contentType string, headers map[string]string) ([]byte, error) {
+func (c *Client) Upload(ctx context.Context, body io.Reader, contentType string, contentLength int64, headers map[string]string) ([]byte, error) {
 	url := fmt.Sprintf("%s/upload", c.baseURL)
 
 	if c.verbose {
-		log.Printf("[DEBUG] Client.Upload: %s - method=PUT, content-type=%s", c.baseURL, contentType)
+		log.Printf("[DEBUG] Client.Upload: %s - method=PUT, content-type=%s, content-length=%d", c.baseURL, contentType, contentLength)
 		log.Printf("[DEBUG] Client.Upload: headers=%v", headers)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, "PUT", url, body)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	// Set Content-Length explicitly if provided
+	// This prevents Go from using chunked transfer encoding, which some upstream servers reject
+	if contentLength >= 0 {
+		req.ContentLength = contentLength
+		if c.verbose {
+			log.Printf("[DEBUG] Client.Upload: set Content-Length to %d", contentLength)
+		}
 	}
 
 	if contentType != "" {
@@ -408,5 +418,5 @@ func (c *Client) Mirror(ctx context.Context, body io.Reader, contentType string,
 
 // UploadWithBody uploads using a byte slice body
 func (c *Client) UploadWithBody(ctx context.Context, body []byte, contentType string, headers map[string]string) ([]byte, error) {
-	return c.Upload(ctx, bytes.NewReader(body), contentType, headers)
+	return c.Upload(ctx, bytes.NewReader(body), contentType, int64(len(body)), headers)
 }
