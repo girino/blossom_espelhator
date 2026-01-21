@@ -2,6 +2,7 @@ package handler
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -16,7 +17,6 @@ import (
 
 	"github.com/girino/blossom_espelhator/internal/auth"
 	"github.com/girino/blossom_espelhator/internal/cache"
-	"github.com/girino/blossom_espelhator/internal/client"
 	"github.com/girino/blossom_espelhator/internal/config"
 	"github.com/girino/blossom_espelhator/internal/stats"
 	"github.com/girino/blossom_espelhator/internal/upstream"
@@ -626,7 +626,7 @@ func (h *BlossomHandler) HandleMirror(w http.ResponseWriter, r *http.Request) {
 
 	// Forward mirror request to upstream servers
 	bodyReader := bytes.NewReader(bodyBytes)
-	successfulServers, err := h.upstreamManager.MirrorParallel(r.Context(), bodyReader, r.Header.Get("Content-Type"), headers)
+	successfulServers, err := h.upstreamManager.MirrorParallel(r.Context(), bodyReader, r.Header.Get("Content-Type"), headers, h.config.Server.Timeout)
 
 	// Track stats for mirror operations
 	// Get all mirror-capable servers (only these are attempted by MirrorParallel)
@@ -856,7 +856,7 @@ func (h *BlossomHandler) handleUploadPreflight(w http.ResponseWriter, r *http.Re
 	}
 
 	// Check upload requirements on all upstream servers
-	results, err := h.upstreamManager.UploadPreflightParallel(r.Context(), preflightHeaders)
+	results, err := h.upstreamManager.UploadPreflightParallel(r.Context(), preflightHeaders, h.config.Server.Timeout)
 	if err != nil {
 		if h.verbose {
 			log.Printf("[DEBUG] handleUploadPreflight: preflight check failed: %v", err)
@@ -970,7 +970,7 @@ func (h *BlossomHandler) HandleDownload(w http.ResponseWriter, r *http.Request) 
 			log.Printf("[DEBUG] HandleDownload: hash %s not found in cache, checking upstream servers", hash)
 		}
 		// Hash not in cache, check upstream servers using HEAD requests
-		servers = h.upstreamManager.CheckHashOnServers(r.Context(), hash)
+		servers = h.upstreamManager.CheckHashOnServers(r.Context(), hash, h.config.Server.Timeout)
 		if len(servers) == 0 {
 			if h.verbose {
 				log.Printf("[DEBUG] HandleDownload: hash %s not found on any upstream server", hash)
@@ -1008,25 +1008,15 @@ func (h *BlossomHandler) HandleDownload(w http.ResponseWriter, r *http.Request) 
 
 	// If no extension in request, try to get it from Content-Type header of selected server
 	if ext == "" {
-		// Create a client for the selected server to make a HEAD request
-		selectedClient := client.New(selectedServer, h.config.Server.Timeout, h.verbose)
-		headResp, err := selectedClient.Head(r.Context(), hash)
-		if err == nil && headResp != nil {
-			contentType := headResp.Header.Get("Content-Type")
-			if contentType != "" {
-				// Parse Content-Type (may contain charset, e.g., "image/png; charset=utf-8")
-				if idx := strings.Index(contentType, ";"); idx != -1 {
-					contentType = strings.TrimSpace(contentType[:idx])
-				}
-				derivedExt := mimeTypeToExtension(contentType)
-				if derivedExt != "" {
-					ext = derivedExt
-					if h.verbose {
-						log.Printf("[DEBUG] HandleDownload: derived extension %q from Content-Type %q", ext, contentType)
-					}
+		contentType, err := h.upstreamManager.GetContentTypeFromServer(r.Context(), selectedServer, hash, h.config.Server.Timeout)
+		if err == nil && contentType != "" {
+			derivedExt := mimeTypeToExtension(contentType)
+			if derivedExt != "" {
+				ext = derivedExt
+				if h.verbose {
+					log.Printf("[DEBUG] HandleDownload: derived extension %q from Content-Type %q", ext, contentType)
 				}
 			}
-			headResp.Body.Close()
 		}
 	}
 
@@ -1096,7 +1086,7 @@ func (h *BlossomHandler) HandleHead(w http.ResponseWriter, r *http.Request) {
 			log.Printf("[DEBUG] HandleHead: hash %s not found in cache, checking upstream servers", hash)
 		}
 		// Hash not in cache, check upstream servers using HEAD requests
-		servers = h.upstreamManager.CheckHashOnServers(r.Context(), hash)
+		servers = h.upstreamManager.CheckHashOnServers(r.Context(), hash, h.config.Server.Timeout)
 		if len(servers) == 0 {
 			if h.verbose {
 				log.Printf("[DEBUG] HandleHead: hash %s not found on any upstream server", hash)
@@ -1139,8 +1129,10 @@ func (h *BlossomHandler) HandleHead(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Perform HEAD request using client
-	resp, err := cl.Head(r.Context(), hash)
+	// Perform HEAD request using client with timeout
+	headCtx, cancel := context.WithTimeout(r.Context(), h.config.Server.Timeout)
+	defer cancel()
+	resp, err := cl.Head(headCtx, hash)
 	if err != nil {
 		if h.verbose {
 			log.Printf("[DEBUG] HandleHead: HEAD request failed: %v", err)
@@ -1212,7 +1204,7 @@ func (h *BlossomHandler) HandleList(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Query all upstream servers in parallel and merge results
-	mergedResults, listResults, err := h.upstreamManager.ListParallelWithResults(r.Context(), path)
+	mergedResults, listResults, err := h.upstreamManager.ListParallelWithResults(r.Context(), path, h.config.Server.Timeout)
 	if err != nil {
 		if h.verbose {
 			log.Printf("[DEBUG] HandleList: list request failed: %v", err)
@@ -1377,6 +1369,10 @@ func (h *BlossomHandler) HandleDelete(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Forward delete to all servers that have the blob
+	// Create a timeout context for delete operations
+	deleteCtx, cancel := context.WithTimeout(r.Context(), h.config.Server.Timeout)
+	defer cancel()
+
 	successCount := 0
 	for _, serverURL := range servers {
 		cl, err := h.upstreamManager.GetClient(serverURL)
@@ -1387,7 +1383,7 @@ func (h *BlossomHandler) HandleDelete(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
-		err = cl.Delete(r.Context(), hash, headers)
+		err = cl.Delete(deleteCtx, hash, headers)
 		if err == nil {
 			successCount++
 			h.stats.RecordSuccess(serverURL, "delete")

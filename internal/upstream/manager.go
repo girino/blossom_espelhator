@@ -9,6 +9,7 @@ import (
 	"log"
 	"math/rand"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -82,8 +83,6 @@ type Manager struct {
 	redirectStrategy   string
 	roundRobinIndex    int
 	roundRobinMutex    sync.Mutex
-	timeout            time.Duration // Timeout for download/HEAD/DELETE requests
-	uploadTimeout      time.Duration // Timeout for upload requests (should be longer for large files)
 	verbose            bool
 	getTotalFailures   func(string) int64 // Function to get total failures for a server (for health_based strategy)
 }
@@ -131,6 +130,7 @@ func New(cfg *config.Config, verbose bool) (*Manager, error) {
 		clients = append(clients, cl)
 
 		// Create separate clients with upload timeout for uploads
+		// Use min upload timeout for HTTP client timeout (the actual request timeout is handled by context)
 		uploadCl := client.New(server.URL, cfg.Server.MinUploadTimeout, verbose)
 		uploadClients = append(uploadClients, uploadCl)
 
@@ -162,8 +162,6 @@ func New(cfg *config.Config, verbose bool) (*Manager, error) {
 		serverCapabilities: capabilities,
 		minUploadServers:   cfg.Server.MinUploadServers,
 		redirectStrategy:   cfg.Server.RedirectStrategy,
-		timeout:            cfg.Server.Timeout,
-		uploadTimeout:      cfg.Server.MinUploadTimeout,
 		verbose:            verbose,
 		getTotalFailures:   nil, // Will be set via SetFailureGetter if needed
 	}, nil
@@ -181,15 +179,16 @@ type UploadResultWithResponse struct {
 }
 
 // UploadParallel uploads a blob to multiple upstream servers in parallel
+// timeout specifies the timeout for the upload context (typically calculated from expiration timestamp)
 // Returns the list of successful servers with their response bodies and an error if fewer than minUploadServers succeeded
-func (m *Manager) UploadParallel(ctx context.Context, body io.Reader, contentType string, headers map[string]string) ([]UploadResultWithResponse, error) {
+func (m *Manager) UploadParallel(ctx context.Context, body io.Reader, contentType string, headers map[string]string, timeout time.Duration) ([]UploadResultWithResponse, error) {
 	if m.verbose {
 		log.Printf("[DEBUG] UploadParallel: starting parallel upload to %d servers", len(m.clients))
-		log.Printf("[DEBUG] UploadParallel: content-type=%s, headers=%v", contentType, headers)
+		log.Printf("[DEBUG] UploadParallel: content-type=%s, headers=%v, timeout=%v", contentType, headers, timeout)
 	}
 
-	// Create a context with upload timeout (longer than regular timeout for large files)
-	uploadCtx, cancel := context.WithTimeout(ctx, m.uploadTimeout)
+	// Create a context with upload timeout (calculated from expiration timestamp if available)
+	uploadCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	// Channel to collect results
@@ -547,8 +546,9 @@ func (m *Manager) UploadParallelStreaming(ctx context.Context, body io.Reader, c
 
 // MirrorParallel sends mirror requests to multiple upstream servers in parallel (BUD-04)
 // Only sends to servers that support mirror capability
+// timeout specifies the timeout for the mirror context
 // Returns the list of successful servers with their response bodies and an error if fewer than minUploadServers succeeded
-func (m *Manager) MirrorParallel(ctx context.Context, body io.Reader, contentType string, headers map[string]string) ([]UploadResultWithResponse, error) {
+func (m *Manager) MirrorParallel(ctx context.Context, body io.Reader, contentType string, headers map[string]string, timeout time.Duration) ([]UploadResultWithResponse, error) {
 	// Filter servers by mirror capability
 	mirrorCapableIndices := make([]int, 0)
 	for i, cap := range m.serverCapabilities {
@@ -564,11 +564,11 @@ func (m *Manager) MirrorParallel(ctx context.Context, body io.Reader, contentTyp
 	if m.verbose {
 		log.Printf("[DEBUG] MirrorParallel: starting parallel mirror requests to %d/%d servers (filtered by capability)",
 			len(mirrorCapableIndices), len(m.clients))
-		log.Printf("[DEBUG] MirrorParallel: content-type=%s, headers=%v", contentType, headers)
+		log.Printf("[DEBUG] MirrorParallel: content-type=%s, headers=%v, timeout=%v", contentType, headers, timeout)
 	}
 
 	// Create a context with timeout
-	mirrorCtx, cancel := context.WithTimeout(ctx, m.timeout)
+	mirrorCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	// Channel to collect results
@@ -993,12 +993,47 @@ func (m *Manager) GetMirrorCapableServers() []string {
 	return mirrorCapableServers
 }
 
+// GetContentTypeFromServer performs a HEAD request to get the Content-Type header for a blob
+// Returns the Content-Type header value (without charset) and an error if the request fails
+func (m *Manager) GetContentTypeFromServer(ctx context.Context, serverURL string, hash string, timeout time.Duration) (string, error) {
+	cl, err := m.GetClient(serverURL)
+	if err != nil {
+		return "", fmt.Errorf("failed to get client for %s: %w", serverURL, err)
+	}
+
+	// Create timeout context for HEAD request
+	headCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	headResp, err := cl.Head(headCtx, hash)
+	if err != nil {
+		return "", fmt.Errorf("HEAD request failed: %w", err)
+	}
+	defer headResp.Body.Close()
+
+	contentType := headResp.Header.Get("Content-Type")
+	if contentType == "" {
+		return "", nil
+	}
+
+	// Parse Content-Type (may contain charset, e.g., "image/png; charset=utf-8")
+	if idx := strings.Index(contentType, ";"); idx != -1 {
+		contentType = strings.TrimSpace(contentType[:idx])
+	}
+
+	return contentType, nil
+}
+
 // CheckHashOnServers checks all upstream servers in parallel to see which ones have the blob
 // Returns list of server URLs that have the blob
-func (m *Manager) CheckHashOnServers(ctx context.Context, hash string) []string {
+func (m *Manager) CheckHashOnServers(ctx context.Context, hash string, timeout time.Duration) []string {
 	if m.verbose {
-		log.Printf("[DEBUG] CheckHashOnServers: checking hash %s on %d servers", hash, len(m.clients))
+		log.Printf("[DEBUG] CheckHashOnServers: checking hash %s on %d servers, timeout=%v", hash, len(m.clients), timeout)
 	}
+
+	// Create a context with timeout
+	checkCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
 
 	// Channel to collect results
 	resultChan := make(chan struct {
@@ -1017,7 +1052,7 @@ func (m *Manager) CheckHashOnServers(ctx context.Context, hash string) []string 
 				log.Printf("[DEBUG] CheckHashOnServers: checking server %d: %s", idx+1, url)
 			}
 
-			_, err := c.Download(ctx, hash)
+			_, err := c.Download(checkCtx, hash)
 			hasBlob := err == nil
 
 			resultChan <- struct {
@@ -1068,8 +1103,9 @@ type UploadPreflightResult struct {
 
 // UploadPreflightParallel performs HEAD /upload on all upstream servers in parallel to check upload requirements (BUD-06)
 // Only sends to servers that support HEAD /upload capability
+// timeout specifies the timeout for the preflight context
 // Returns the list of servers that would accept the upload
-func (m *Manager) UploadPreflightParallel(ctx context.Context, headers map[string]string) ([]UploadPreflightResult, error) {
+func (m *Manager) UploadPreflightParallel(ctx context.Context, headers map[string]string, timeout time.Duration) ([]UploadPreflightResult, error) {
 	// Filter servers by upload_head capability
 	uploadHeadCapableIndices := make([]int, 0)
 	for i, cap := range m.serverCapabilities {
@@ -1085,11 +1121,11 @@ func (m *Manager) UploadPreflightParallel(ctx context.Context, headers map[strin
 	if m.verbose {
 		log.Printf("[DEBUG] UploadPreflightParallel: checking upload requirements on %d/%d servers (filtered by capability)",
 			len(uploadHeadCapableIndices), len(m.clients))
-		log.Printf("[DEBUG] UploadPreflightParallel: headers=%v", headers)
+		log.Printf("[DEBUG] UploadPreflightParallel: headers=%v, timeout=%v", headers, timeout)
 	}
 
 	// Create a context with timeout
-	preflightCtx, cancel := context.WithTimeout(ctx, m.timeout)
+	preflightCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	// Channel to collect results
@@ -1198,10 +1234,15 @@ func (m *Manager) UploadPreflightParallel(ctx context.Context, headers map[strin
 }
 
 // ListParallel queries all upstream servers in parallel for a list of blobs
-func (m *Manager) ListParallel(ctx context.Context, pubkey string) ([]map[string]interface{}, error) {
+// timeout specifies the timeout for the list context
+func (m *Manager) ListParallel(ctx context.Context, pubkey string, timeout time.Duration) ([]map[string]interface{}, error) {
 	if m.verbose {
-		log.Printf("[DEBUG] ListParallel: starting parallel list query to %d servers for pubkey %s", len(m.clients), pubkey)
+		log.Printf("[DEBUG] ListParallel: starting parallel list query to %d servers for pubkey %s, timeout=%v", len(m.clients), pubkey, timeout)
 	}
+
+	// Create a context with timeout
+	listCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
 
 	// Channel to collect results
 	resultChan := make(chan struct {
@@ -1221,7 +1262,7 @@ func (m *Manager) ListParallel(ctx context.Context, pubkey string) ([]map[string
 				log.Printf("[DEBUG] ListParallel: querying server %d: %s", idx+1, url)
 			}
 
-			response, err := c.List(ctx, pubkey)
+			response, err := c.List(listCtx, pubkey)
 			if err != nil {
 				if m.verbose {
 					log.Printf("[DEBUG] ListParallel: server %d (%s) failed: %v", idx+1, url, err)
@@ -1477,9 +1518,13 @@ type ListResult struct {
 
 // ListParallelWithResults queries all upstream servers and returns both merged results and per-server results
 // This is a wrapper around ListParallel that also returns individual server results for stats tracking
-func (m *Manager) ListParallelWithResults(ctx context.Context, pubkey string) ([]map[string]interface{}, []ListResult, error) {
+func (m *Manager) ListParallelWithResults(ctx context.Context, pubkey string, timeout time.Duration) ([]map[string]interface{}, []ListResult, error) {
 	// Use the existing ListParallel implementation and extract per-server results
 	// We'll call ListParallel but need to capture the results, so we duplicate the logic
+
+	// Create a context with timeout
+	listCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
 
 	// Channel to collect results
 	resultChan := make(chan struct {
@@ -1499,7 +1544,7 @@ func (m *Manager) ListParallelWithResults(ctx context.Context, pubkey string) ([
 				log.Printf("[DEBUG] ListParallel: querying server %d: %s", idx+1, url)
 			}
 
-			response, err := c.List(ctx, pubkey)
+			response, err := c.List(listCtx, pubkey)
 			if err != nil {
 				resultChan <- struct {
 					ServerURL string
