@@ -176,6 +176,57 @@ func setCORSHeaders(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Access-Control-Allow-Headers", "authorization, x-content-length, x-content-type, x-sha-256, content-type")
 }
 
+// calculateTimeout calculates the upload/mirror timeout based on the expiration timestamp
+// in the authorization event. It clamps the timeout between min and max config values.
+func (h *BlossomHandler) calculateTimeout(authEvent *nostr.Event, logPrefix string) time.Duration {
+	minTimeout := h.config.Server.MinUploadTimeout
+	maxTimeout := h.config.Server.MaxUploadTimeout
+	timeout := minTimeout // Default timeout (also used as minimum)
+
+	if authEvent != nil {
+		// Look for expiration tag: ["expiration", "timestamp"]
+		for _, tag := range authEvent.Tags {
+			if len(tag) >= 2 && strings.ToLower(tag[0]) == "expiration" {
+				if expTimestamp, err := strconv.ParseInt(tag[1], 10, 64); err == nil {
+					expirationTime := time.Unix(expTimestamp, 0)
+					now := time.Now()
+
+					// Calculate timeout: expiration - now - buffer (30 seconds safety margin)
+					calculatedTimeout := expirationTime.Sub(now) - 30*time.Second
+
+					// Clamp calculated timeout between min and max
+					if calculatedTimeout > 0 {
+						if calculatedTimeout < minTimeout {
+							timeout = minTimeout
+							if h.verbose {
+								log.Printf("[DEBUG] %s: calculated timeout %v is below minimum %v, using minimum", logPrefix, calculatedTimeout, minTimeout)
+							}
+						} else if calculatedTimeout > maxTimeout {
+							timeout = maxTimeout
+							if h.verbose {
+								log.Printf("[DEBUG] %s: calculated timeout %v exceeds maximum %v, capped at maximum (expires at %v)", logPrefix, calculatedTimeout, maxTimeout, expirationTime)
+							}
+						} else {
+							timeout = calculatedTimeout
+							if h.verbose {
+								log.Printf("[DEBUG] %s: using calculated timeout from expiration: %v (expires at %v, clamped between %v and %v)", logPrefix, timeout, expirationTime, minTimeout, maxTimeout)
+							}
+						}
+					} else {
+						if h.verbose {
+							log.Printf("[DEBUG] %s: expiration timestamp %v is in the past or too soon, using minimum timeout: %v", logPrefix, expirationTime, timeout)
+						}
+					}
+					break
+				} else if h.verbose {
+					log.Printf("[DEBUG] %s: failed to parse expiration timestamp '%s': %v", logPrefix, tag[1], err)
+				}
+			}
+		}
+	}
+	return timeout
+}
+
 // HandleUpload handles PUT /upload and HEAD /upload requests
 // HEAD /upload implements BUD-06: Upload requirements (preflight check)
 func (h *BlossomHandler) HandleUpload(w http.ResponseWriter, r *http.Request) {
@@ -274,51 +325,7 @@ func (h *BlossomHandler) HandleUpload(w http.ResponseWriter, r *http.Request) {
 	// Calculate upload timeout from expiration timestamp in authorization event
 	// This ensures uploads complete before the auth header expires
 	// Timeout is clamped between min_upload_timeout (minimum) and max_upload_timeout (maximum)
-	minTimeout := h.config.Server.MinUploadTimeout
-	maxTimeout := h.config.Server.MaxUploadTimeout
-	uploadTimeout := minTimeout // Default timeout (also used as minimum)
-
-	if authEvent != nil {
-		// Look for expiration tag: ["expiration", "timestamp"]
-		for _, tag := range authEvent.Tags {
-			if len(tag) >= 2 && strings.ToLower(tag[0]) == "expiration" {
-				if expTimestamp, err := strconv.ParseInt(tag[1], 10, 64); err == nil {
-					expirationTime := time.Unix(expTimestamp, 0)
-					now := time.Now()
-
-					// Calculate timeout: expiration - now - buffer (30 seconds safety margin)
-					calculatedTimeout := expirationTime.Sub(now) - 30*time.Second
-
-					// Clamp calculated timeout between min and max
-					if calculatedTimeout > 0 {
-						if calculatedTimeout < minTimeout {
-							uploadTimeout = minTimeout
-							if h.verbose {
-								log.Printf("[DEBUG] HandleUpload: calculated timeout %v is below minimum %v, using minimum", calculatedTimeout, minTimeout)
-							}
-						} else if calculatedTimeout > maxTimeout {
-							uploadTimeout = maxTimeout
-							if h.verbose {
-								log.Printf("[DEBUG] HandleUpload: calculated timeout %v exceeds maximum %v, capped at maximum (expires at %v)", calculatedTimeout, maxTimeout, expirationTime)
-							}
-						} else {
-							uploadTimeout = calculatedTimeout
-							if h.verbose {
-								log.Printf("[DEBUG] HandleUpload: using calculated timeout from expiration: %v (expires at %v, clamped between %v and %v)", uploadTimeout, expirationTime, minTimeout, maxTimeout)
-							}
-						}
-					} else {
-						if h.verbose {
-							log.Printf("[DEBUG] HandleUpload: expiration timestamp %v is in the past or too soon, using minimum timeout: %v", expirationTime, uploadTimeout)
-						}
-					}
-					break
-				} else if h.verbose {
-					log.Printf("[DEBUG] HandleUpload: failed to parse expiration timestamp '%s': %v", tag[1], err)
-				}
-			}
-		}
-	}
+	uploadTimeout := h.calculateTimeout(authEvent, "HandleUpload")
 
 	if h.verbose {
 		log.Printf("[DEBUG] HandleUpload: forwarding headers: %v", headers)
@@ -587,6 +594,8 @@ func (h *BlossomHandler) HandleMirror(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Validate authentication if pubkeys are configured
+	// Also parse the event to extract expiration timestamp for timeout calculation
+	var authEvent *nostr.Event = nil
 	if len(h.allowedPubkeys) > 0 {
 		_, err := auth.ValidateAuth(r, "upload", h.allowedPubkeys, h.verbose)
 		if err != nil {
@@ -603,6 +612,17 @@ func (h *BlossomHandler) HandleMirror(w http.ResponseWriter, r *http.Request) {
 			}
 			http.Error(w, fmt.Sprintf("Authentication error: %v", err), http.StatusUnauthorized)
 			return
+		}
+		// Parse the event to extract expiration timestamp for timeout calculation
+		authHeader := r.Header.Get("Authorization")
+		if authHeader != "" {
+			parsedEvent, err := auth.ParseAuthorizationHeader(authHeader)
+			if err == nil {
+				authEvent = parsedEvent
+				if h.verbose && authEvent != nil {
+					log.Printf("[DEBUG] HandleMirror: parsed authorization event with %d tags", len(authEvent.Tags))
+				}
+			}
 		}
 	}
 
@@ -635,13 +655,19 @@ func (h *BlossomHandler) HandleMirror(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Calculate mirror timeout from expiration timestamp in authorization event
+	// This ensures mirrors complete before the auth header expires
+	// Timeout is clamped between min_upload_timeout (minimum) and max_upload_timeout (maximum)
+	mirrorTimeout := h.calculateTimeout(authEvent, "HandleMirror")
+
 	if h.verbose {
 		log.Printf("[DEBUG] HandleMirror: forwarding headers: %v", headers)
+		log.Printf("[DEBUG] HandleMirror: using mirror timeout: %v", mirrorTimeout)
 	}
 
 	// Forward mirror request to upstream servers
 	bodyReader := bytes.NewReader(bodyBytes)
-	successfulServers, err := h.upstreamManager.MirrorParallel(r.Context(), bodyReader, r.Header.Get("Content-Type"), headers, h.config.Server.Timeout)
+	successfulServers, err := h.upstreamManager.MirrorParallel(r.Context(), bodyReader, r.Header.Get("Content-Type"), headers, mirrorTimeout)
 
 	// Track stats for mirror operations
 	// Get all mirror-capable servers (only these are attempted by MirrorParallel)
