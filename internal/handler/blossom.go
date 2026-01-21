@@ -1176,13 +1176,11 @@ func (h *BlossomHandler) HandleList(w http.ResponseWriter, r *http.Request) {
 			log.Printf("[DEBUG] HandleList: list request failed: %v", err)
 		}
 		// Track failures for all servers if operation failed completely
-		if listResults != nil {
-			for _, result := range listResults {
-				if result.Error != nil {
-					h.stats.RecordFailure(result.ServerURL, "list")
-				} else {
-					h.stats.RecordSuccess(result.ServerURL, "list")
-				}
+		for _, result := range listResults {
+			if result.Error != nil {
+				h.stats.RecordFailure(result.ServerURL, "list")
+			} else {
+				h.stats.RecordSuccess(result.ServerURL, "list")
 			}
 		}
 		http.Error(w, fmt.Sprintf("List request failed: %v", err), http.StatusInternalServerError)
@@ -1190,13 +1188,11 @@ func (h *BlossomHandler) HandleList(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Track stats for all servers based on their individual results
-	if listResults != nil {
-		for _, result := range listResults {
-			if result.Error != nil {
-				h.stats.RecordFailure(result.ServerURL, "list")
-			} else {
-				h.stats.RecordSuccess(result.ServerURL, "list")
-			}
+	for _, result := range listResults {
+		if result.Error != nil {
+			h.stats.RecordFailure(result.ServerURL, "list")
+		} else {
+			h.stats.RecordSuccess(result.ServerURL, "list")
 		}
 	}
 
