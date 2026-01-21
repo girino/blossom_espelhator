@@ -12,6 +12,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/girino/blossom_espelhator/internal/auth"
 	"github.com/girino/blossom_espelhator/internal/cache"
@@ -19,6 +20,7 @@ import (
 	"github.com/girino/blossom_espelhator/internal/config"
 	"github.com/girino/blossom_espelhator/internal/stats"
 	"github.com/girino/blossom_espelhator/internal/upstream"
+	"github.com/nbd-wtf/go-nostr"
 )
 
 // mimeTypeToExtension maps common mime types to file extensions
@@ -191,6 +193,8 @@ func (h *BlossomHandler) HandleUpload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Validate authentication if pubkeys are configured
+	// Also parse the event to extract expiration timestamp for timeout calculation
+	var authEvent *nostr.Event = nil
 	if len(h.allowedPubkeys) > 0 {
 		_, err := auth.ValidateAuth(r, "upload", h.allowedPubkeys, h.verbose)
 		if err != nil {
@@ -207,6 +211,17 @@ func (h *BlossomHandler) HandleUpload(w http.ResponseWriter, r *http.Request) {
 			}
 			http.Error(w, fmt.Sprintf("Authentication error: %v", err), http.StatusUnauthorized)
 			return
+		}
+		// Parse the event to extract expiration timestamp for timeout calculation
+		authHeader := r.Header.Get("Authorization")
+		if authHeader != "" {
+			parsedEvent, err := auth.ParseAuthorizationHeader(authHeader)
+			if err == nil {
+				authEvent = parsedEvent
+				if h.verbose && authEvent != nil {
+					log.Printf("[DEBUG] HandleUpload: parsed authorization event with %d tags", len(authEvent.Tags))
+				}
+			}
 		}
 	}
 
@@ -241,8 +256,53 @@ func (h *BlossomHandler) HandleUpload(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Calculate upload timeout from expiration timestamp in authorization event
+	// This ensures uploads complete before the auth header expires
+	uploadTimeout := h.config.Server.UploadTimeout // Default timeout (also used as minimum)
+	if authEvent != nil {
+		// Look for expiration tag: ["expiration", "timestamp"]
+		for _, tag := range authEvent.Tags {
+			if len(tag) >= 2 && strings.ToLower(tag[0]) == "expiration" {
+				if expTimestamp, err := strconv.ParseInt(tag[1], 10, 64); err == nil {
+					expirationTime := time.Unix(expTimestamp, 0)
+					now := time.Now()
+
+					// Calculate timeout: expiration - now - buffer (30 seconds safety margin)
+					calculatedTimeout := expirationTime.Sub(now) - 30*time.Second
+
+					// Use calculated timeout if it's positive and longer than default
+					// Otherwise use default timeout (but ensure minimum is config.Server.UploadTimeout)
+					if calculatedTimeout > uploadTimeout {
+						uploadTimeout = calculatedTimeout
+						if h.verbose {
+							log.Printf("[DEBUG] HandleUpload: calculated upload timeout from expiration: %v (expires at %v)", uploadTimeout, expirationTime)
+						}
+					} else if calculatedTimeout > 0 && calculatedTimeout < uploadTimeout {
+						// Use calculated timeout even if shorter, but ensure minimum is config.Server.UploadTimeout
+						if calculatedTimeout < h.config.Server.UploadTimeout {
+							uploadTimeout = h.config.Server.UploadTimeout
+						} else {
+							uploadTimeout = calculatedTimeout
+						}
+						if h.verbose {
+							log.Printf("[DEBUG] HandleUpload: using calculated timeout from expiration: %v (expires at %v, minimum %v)", uploadTimeout, expirationTime, h.config.Server.UploadTimeout)
+						}
+					} else {
+						if h.verbose {
+							log.Printf("[DEBUG] HandleUpload: expiration timestamp %v is in the past or too soon, using default timeout: %v", expirationTime, uploadTimeout)
+						}
+					}
+					break
+				} else if h.verbose {
+					log.Printf("[DEBUG] HandleUpload: failed to parse expiration timestamp '%s': %v", tag[1], err)
+				}
+			}
+		}
+	}
+
 	if h.verbose {
 		log.Printf("[DEBUG] HandleUpload: forwarding headers: %v", headers)
+		log.Printf("[DEBUG] HandleUpload: using upload timeout: %v", uploadTimeout)
 	}
 
 	// Stream upload to upstream servers while calculating hash in parallel
@@ -264,7 +324,8 @@ func (h *BlossomHandler) HandleUpload(w http.ResponseWriter, r *http.Request) {
 	// providing data to the streaming upload
 	// IMPORTANT: teeReader writes to hashWriter as it reads from r.Body,
 	// so the hash is calculated during the streaming process
-	successfulServers, err := h.upstreamManager.UploadParallelStreaming(r.Context(), teeReader, r.Header.Get("Content-Type"), contentLength, headers)
+	// Pass the calculated timeout based on expiration timestamp
+	successfulServers, err := h.upstreamManager.UploadParallelStreaming(r.Context(), teeReader, r.Header.Get("Content-Type"), contentLength, headers, uploadTimeout)
 
 	// IMPORTANT: Do NOT drain r.Body again here!
 	// teeReader has already consumed r.Body completely when UploadParallelStreaming returns.

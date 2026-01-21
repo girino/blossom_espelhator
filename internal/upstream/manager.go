@@ -326,15 +326,16 @@ func (m *Manager) UploadParallel(ctx context.Context, body io.Reader, contentTyp
 // Unlike UploadParallel, this method streams the body directly without buffering it first
 // This allows uploads to start immediately, preventing auth header expiration on large files
 // contentLength should be set if known (>= 0), otherwise -1 to use chunked encoding
+// timeout specifies the timeout for the upload context (typically calculated from expiration timestamp)
 // Returns the list of successful servers with their response bodies and an error if fewer than minUploadServers succeeded
-func (m *Manager) UploadParallelStreaming(ctx context.Context, body io.Reader, contentType string, contentLength int64, headers map[string]string) ([]UploadResultWithResponse, error) {
+func (m *Manager) UploadParallelStreaming(ctx context.Context, body io.Reader, contentType string, contentLength int64, headers map[string]string, timeout time.Duration) ([]UploadResultWithResponse, error) {
 	if m.verbose {
 		log.Printf("[DEBUG] UploadParallelStreaming: starting streaming parallel upload to %d servers", len(m.uploadClients))
-		log.Printf("[DEBUG] UploadParallelStreaming: content-type=%s, headers=%v", contentType, headers)
+		log.Printf("[DEBUG] UploadParallelStreaming: content-type=%s, headers=%v, timeout=%v", contentType, headers, timeout)
 	}
 
-	// Create a context with upload timeout (longer than regular timeout for large files)
-	uploadCtx, cancel := context.WithTimeout(ctx, m.uploadTimeout)
+	// Create a context with upload timeout (calculated from expiration timestamp if available)
+	uploadCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	// Create pipes for each upstream server
