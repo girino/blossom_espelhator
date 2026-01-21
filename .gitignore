@@ -32,3 +32,5 @@ Thumbs.db
 # Config files with secrets
 config/config.yaml
 /server
+config/.env
+.env
