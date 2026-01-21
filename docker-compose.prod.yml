@@ -18,8 +18,12 @@ services:
       - blossom-espelhator
     networks:
       - blossom-net
-    labels:
-      - "blossom.espelhator.service=nginx"
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--output-document=/dev/null", "http://127.0.0.1:7624/health"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
 
   blossom-espelhator:
     build:
