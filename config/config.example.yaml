@@ -52,11 +52,18 @@ server:
   # Timeout for upstream server requests (download/HEAD/DELETE operations)
   timeout: 30s
   
-  # Timeout for upload requests (should be longer for large file uploads)
+  # Minimum timeout for upload requests (used when expiration timestamp is missing or too short)
   # Default: 5m (5 minutes) if not specified
   # Recommended: Set based on your largest expected file size and upload speed
   # Example: For 100MB uploads at 10MB/s, use at least 20s, but add buffer for network variability
-  upload_timeout: 5m
+  min_upload_timeout: 5m
+  
+  # Maximum timeout for upload requests (caps the timeout calculated from expiration timestamp)
+  # Default: 30m (30 minutes) if not specified
+  # The upload timeout is calculated from the authorization header's expiration timestamp
+  # but is clamped between min_upload_timeout (minimum) and max_upload_timeout (maximum)
+  # This prevents extremely long timeouts while still allowing flexibility for large files
+  max_upload_timeout: 30m
   
   # Maximum number of retries for failed requests
   max_retries: 3

@@ -131,7 +131,7 @@ func New(cfg *config.Config, verbose bool) (*Manager, error) {
 		clients = append(clients, cl)
 
 		// Create separate clients with upload timeout for uploads
-		uploadCl := client.New(server.URL, cfg.Server.UploadTimeout, verbose)
+		uploadCl := client.New(server.URL, cfg.Server.MinUploadTimeout, verbose)
 		uploadClients = append(uploadClients, uploadCl)
 
 		serverURLs = append(serverURLs, server.URL)
@@ -163,7 +163,7 @@ func New(cfg *config.Config, verbose bool) (*Manager, error) {
 		minUploadServers:   cfg.Server.MinUploadServers,
 		redirectStrategy:   cfg.Server.RedirectStrategy,
 		timeout:            cfg.Server.Timeout,
-		uploadTimeout:      cfg.Server.UploadTimeout,
+		uploadTimeout:      cfg.Server.MinUploadTimeout,
 		verbose:            verbose,
 		getTotalFailures:   nil, // Will be set via SetFailureGetter if needed
 	}, nil

@@ -35,7 +35,8 @@ type ServerConfig struct {
 	DownloadRedirectStrategy string        `yaml:"download_redirect_strategy"` // Fallback redirect strategy for GET requests (defaults to redirect_strategy)
 	BaseURL                  string        `yaml:"base_url"`                   // Base URL for local strategy (overrides request-derived URL)
 	Timeout                  time.Duration `yaml:"timeout"`                    // Timeout for download/HEAD/DELETE requests
-	UploadTimeout            time.Duration `yaml:"upload_timeout"`             // Timeout for upload requests (should be longer for large files)
+	MinUploadTimeout         time.Duration `yaml:"min_upload_timeout"`         // Minimum timeout for upload requests (default: 5 minutes)
+	MaxUploadTimeout         time.Duration `yaml:"max_upload_timeout"`         // Maximum timeout for upload requests (default: 30 minutes)
 	MaxRetries               int           `yaml:"max_retries"`
 
 	// Health check configuration
@@ -72,8 +73,11 @@ func Load(path string) (*Config, error) {
 	if config.Server.Timeout == 0 {
 		config.Server.Timeout = 30 * time.Second
 	}
-	if config.Server.UploadTimeout == 0 {
-		config.Server.UploadTimeout = 5 * time.Minute // Default 5 minutes for uploads
+	if config.Server.MinUploadTimeout == 0 {
+		config.Server.MinUploadTimeout = 5 * time.Minute // Default 5 minutes minimum for uploads
+	}
+	if config.Server.MaxUploadTimeout == 0 {
+		config.Server.MaxUploadTimeout = 30 * time.Minute // Default 30 minutes maximum for uploads
 	}
 	if config.Server.MaxRetries == 0 {
 		config.Server.MaxRetries = 3

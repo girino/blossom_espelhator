@@ -258,7 +258,11 @@ func (h *BlossomHandler) HandleUpload(w http.ResponseWriter, r *http.Request) {
 
 	// Calculate upload timeout from expiration timestamp in authorization event
 	// This ensures uploads complete before the auth header expires
-	uploadTimeout := h.config.Server.UploadTimeout // Default timeout (also used as minimum)
+	// Timeout is clamped between min_upload_timeout (minimum) and max_upload_timeout (maximum)
+	minTimeout := h.config.Server.MinUploadTimeout
+	maxTimeout := h.config.Server.MaxUploadTimeout
+	uploadTimeout := minTimeout // Default timeout (also used as minimum)
+
 	if authEvent != nil {
 		// Look for expiration tag: ["expiration", "timestamp"]
 		for _, tag := range authEvent.Tags {
@@ -270,26 +274,27 @@ func (h *BlossomHandler) HandleUpload(w http.ResponseWriter, r *http.Request) {
 					// Calculate timeout: expiration - now - buffer (30 seconds safety margin)
 					calculatedTimeout := expirationTime.Sub(now) - 30*time.Second
 
-					// Use calculated timeout if it's positive and longer than default
-					// Otherwise use default timeout (but ensure minimum is config.Server.UploadTimeout)
-					if calculatedTimeout > uploadTimeout {
-						uploadTimeout = calculatedTimeout
-						if h.verbose {
-							log.Printf("[DEBUG] HandleUpload: calculated upload timeout from expiration: %v (expires at %v)", uploadTimeout, expirationTime)
-						}
-					} else if calculatedTimeout > 0 && calculatedTimeout < uploadTimeout {
-						// Use calculated timeout even if shorter, but ensure minimum is config.Server.UploadTimeout
-						if calculatedTimeout < h.config.Server.UploadTimeout {
-							uploadTimeout = h.config.Server.UploadTimeout
+					// Clamp calculated timeout between min and max
+					if calculatedTimeout > 0 {
+						if calculatedTimeout < minTimeout {
+							uploadTimeout = minTimeout
+							if h.verbose {
+								log.Printf("[DEBUG] HandleUpload: calculated timeout %v is below minimum %v, using minimum", calculatedTimeout, minTimeout)
+							}
+						} else if calculatedTimeout > maxTimeout {
+							uploadTimeout = maxTimeout
+							if h.verbose {
+								log.Printf("[DEBUG] HandleUpload: calculated timeout %v exceeds maximum %v, capped at maximum (expires at %v)", calculatedTimeout, maxTimeout, expirationTime)
+							}
 						} else {
 							uploadTimeout = calculatedTimeout
-						}
-						if h.verbose {
-							log.Printf("[DEBUG] HandleUpload: using calculated timeout from expiration: %v (expires at %v, minimum %v)", uploadTimeout, expirationTime, h.config.Server.UploadTimeout)
+							if h.verbose {
+								log.Printf("[DEBUG] HandleUpload: using calculated timeout from expiration: %v (expires at %v, clamped between %v and %v)", uploadTimeout, expirationTime, minTimeout, maxTimeout)
+							}
 						}
 					} else {
 						if h.verbose {
-							log.Printf("[DEBUG] HandleUpload: expiration timestamp %v is in the past or too soon, using default timeout: %v", expirationTime, uploadTimeout)
+							log.Printf("[DEBUG] HandleUpload: expiration timestamp %v is in the past or too soon, using minimum timeout: %v", expirationTime, uploadTimeout)
 						}
 					}
 					break
