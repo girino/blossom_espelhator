@@ -130,7 +130,7 @@ func New(cfg *config.Config, verbose bool) (*Manager, error) {
 
 		// Create separate clients with upload timeout for uploads
 		// Use min upload timeout for HTTP client timeout (the actual request timeout is handled by context)
-		uploadCl := client.New(server.URL, cfg.Server.MinUploadTimeout, verbose)
+		uploadCl := client.New(server.URL, cfg.Server.MaxUploadTimeout, verbose)
 		uploadClients = append(uploadClients, uploadCl)
 
 		serverURLs = append(serverURLs, server.URL)
@@ -566,14 +566,11 @@ func (m *Manager) MirrorParallel(ctx context.Context, body io.Reader, contentTyp
 		log.Printf("[DEBUG] MirrorParallel: content-type=%s, headers=%v, timeout=%v", contentType, headers, timeout)
 	}
 
-	// Create a context with timeout
-	mirrorCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-
 	// Channel to collect results
 	resultChan := make(chan UploadResult, len(mirrorCapableIndices))
 
 	// Read body into memory so we can reuse it for multiple mirror requests
+	// Do this BEFORE creating the timeout context so the timeout only applies to HTTP requests
 	bodyBytes, err := io.ReadAll(body)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read request body: %w", err)
@@ -583,11 +580,17 @@ func (m *Manager) MirrorParallel(ctx context.Context, body io.Reader, contentTyp
 		log.Printf("[DEBUG] MirrorParallel: read %d bytes from request body", len(bodyBytes))
 	}
 
+	// Create a context with timeout AFTER reading the body
+	// This ensures the timeout only applies to the actual HTTP requests, not body reading
+	mirrorCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
 	// Launch parallel mirror requests (only to capable servers)
+	// Use uploadClients instead of regular clients since mirrors need longer timeouts like uploads
 	var wg sync.WaitGroup
 	for _, idx := range mirrorCapableIndices {
 		wg.Add(1)
-		cl := m.clients[idx]
+		cl := m.uploadClients[idx]
 		url := m.serverURLs[idx]
 		go func(serverIdx int, c *client.Client, serverURL string) {
 			defer wg.Done()
@@ -994,7 +997,7 @@ func (m *Manager) GetMirrorCapableServers() []string {
 
 // CheckPathOnServersResult contains the result of checking servers for a path
 type CheckPathOnServersResult struct {
-	Servers []string              // List of server URLs that have the blob
+	Servers []string               // List of server URLs that have the blob
 	Headers map[string]http.Header // Map of server URL to response headers (only for servers with blob)
 }
 
@@ -1030,7 +1033,7 @@ func (m *Manager) CheckPathOnServers(ctx context.Context, path string, timeout t
 			// Use Head() to get headers, passing the full path (may include extension)
 			headResp, err := c.Head(checkCtx, path)
 			hasBlob := err == nil && headResp != nil && headResp.StatusCode == http.StatusOK
-			
+
 			var headers http.Header
 			if hasBlob && headResp != nil {
 				headers = headResp.Header
