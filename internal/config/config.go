@@ -44,6 +44,10 @@ type ServerConfig struct {
 	MaxGoroutines  int   `yaml:"max_goroutines"`   // Maximum number of goroutines before marking system unhealthy
 	MaxMemoryBytes int64 `yaml:"max_memory_bytes"` // Maximum memory usage in bytes before marking system unhealthy
 
+	// Cache configuration
+	CacheTTL    time.Duration `yaml:"cache_ttl"`     // Time-to-live for cache entries (default: 5 minutes)
+	CacheMaxSize int          `yaml:"cache_max_size"` // Maximum number of entries in cache (default: 1000)
+
 	// Authentication configuration
 	AllowedPubkeys []string `yaml:"allowed_pubkeys"` // List of allowed pubkeys (hex format or npub bech32 format). If empty, auth is disabled
 }
@@ -90,6 +94,12 @@ func Load(path string) (*Config, error) {
 	}
 	if config.Server.MaxMemoryBytes == 0 {
 		config.Server.MaxMemoryBytes = 512 * 1024 * 1024 // Default: 512 MB
+	}
+	if config.Server.CacheTTL == 0 {
+		config.Server.CacheTTL = 5 * time.Minute // Default: 5 minutes
+	}
+	if config.Server.CacheMaxSize == 0 {
+		config.Server.CacheMaxSize = 1000 // Default: 1000 entries
 	}
 
 	// Set default capabilities for upstream servers (default to false for optional endpoints)

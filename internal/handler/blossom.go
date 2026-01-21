@@ -120,6 +120,21 @@ func (h *BlossomHandler) constructLocalURL(hash string, mimeType string, r *http
 	return fmt.Sprintf("%s/%s", baseURL, hash)
 }
 
+// validatePath validates that a path contains a valid hash (first 64 hex characters)
+// Returns an error if the path is too short or the hash portion is invalid
+func validatePath(path string) error {
+	if len(path) < 64 {
+		return fmt.Errorf("path too short: %s", path)
+	}
+
+	hash := path[:64]
+	if _, err := hex.DecodeString(hash); err != nil {
+		return fmt.Errorf("invalid hash format (not hex): %w", err)
+	}
+
+	return nil
+}
+
 // BlossomHandler handles Blossom protocol requests
 type BlossomHandler struct {
 	upstreamManager *upstream.Manager
@@ -923,70 +938,47 @@ func (h *BlossomHandler) HandleDownload(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// Extract hash and extension from path (remove leading slash)
+	// Extract path (remove leading slash)
 	path := strings.TrimPrefix(r.URL.Path, "/")
 
-	// Extract extension if present (e.g., /hash.png -> extension = ".png")
-	// The dot must be after the hash (at position 64 or later) to be considered an extension
-	var ext string
-	if lastDot := strings.LastIndex(path, "."); lastDot >= 64 {
-		// Extract everything after the last dot as extension
-		potentialExt := path[lastDot:]
-		// Validate it looks like a file extension (not too long, reasonable chars)
-		if len(potentialExt) <= 10 && len(potentialExt) > 1 {
-			ext = potentialExt
-			path = path[:lastDot] // Remove extension from path
+	// Validate path format (must contain a valid hash in the first 64 characters)
+	if err := validatePath(path); err != nil {
+		if h.verbose {
+			log.Printf("[DEBUG] HandleDownload: %v", err)
 		}
+		http.Error(w, "Invalid hash format", http.StatusBadRequest)
+		return
 	}
-
-	hash := path
 
 	if h.verbose {
-		log.Printf("[DEBUG] HandleDownload: extracted hash: %s, extension: %s", hash, ext)
+		log.Printf("[DEBUG] HandleDownload: path: %s", path)
 	}
 
-	// Validate hash format (should be 64 hex characters for SHA256)
-	if len(hash) != 64 {
-		if h.verbose {
-			log.Printf("[DEBUG] HandleDownload: invalid hash length: %d", len(hash))
-		}
-		http.Error(w, "Invalid hash format", http.StatusBadRequest)
-		return
-	}
-
-	// Check if hash is valid hex
-	if _, err := hex.DecodeString(hash); err != nil {
-		if h.verbose {
-			log.Printf("[DEBUG] HandleDownload: invalid hash format (not hex): %v", err)
-		}
-		http.Error(w, "Invalid hash format", http.StatusBadRequest)
-		return
-	}
-
-	// Look up hash in cache
-	servers, exists := h.cache.Get(hash)
+	// Look up path in cache
+	servers, exists := h.cache.Get(path)
 	if !exists || len(servers) == 0 {
 		if h.verbose {
-			log.Printf("[DEBUG] HandleDownload: hash %s not found in cache, checking upstream servers", hash)
+			log.Printf("[DEBUG] HandleDownload: path %s not found in cache, checking upstream servers", path)
 		}
-		// Hash not in cache, check upstream servers using HEAD requests
-		servers = h.upstreamManager.CheckHashOnServers(r.Context(), hash, h.config.Server.Timeout)
+		// Path not in cache, check upstream servers using HEAD requests
+		result := h.upstreamManager.CheckPathOnServers(r.Context(), path, h.config.Server.Timeout)
+		servers = result.Servers
 		if len(servers) == 0 {
 			if h.verbose {
-				log.Printf("[DEBUG] HandleDownload: hash %s not found on any upstream server", hash)
+				log.Printf("[DEBUG] HandleDownload: path %s not found on any upstream server", path)
 			}
 			http.Error(w, "Blob not found", http.StatusNotFound)
 			return
 		}
 		// Update cache with found servers
-		h.cache.Add(hash, servers)
+		h.cache.Add(path, servers)
 		if h.verbose {
-			log.Printf("[DEBUG] HandleDownload: hash %s found on %d upstream servers, added to cache", hash, len(servers))
+			log.Printf("[DEBUG] HandleDownload: path %s found on %d upstream servers, added to cache", path, len(servers))
 		}
 	}
 
 	if h.verbose {
-		log.Printf("[DEBUG] HandleDownload: hash found in cache with %d servers: %v", len(servers), servers)
+		log.Printf("[DEBUG] HandleDownload: path found in cache with %d servers: %v", len(servers), servers)
 	}
 
 	// Select a server for redirect using download_redirect_strategy if set, otherwise fall back to redirect_strategy
@@ -1006,33 +998,14 @@ func (h *BlossomHandler) HandleDownload(w http.ResponseWriter, r *http.Request) 
 	// Track download success for the selected server
 	h.stats.RecordSuccess(selectedServer, "download")
 
-	// If no extension in request, try to get it from Content-Type header of selected server
-	if ext == "" {
-		contentType, err := h.upstreamManager.GetContentTypeFromServer(r.Context(), selectedServer, hash, h.config.Server.Timeout)
-		if err == nil && contentType != "" {
-			derivedExt := mimeTypeToExtension(contentType)
-			if derivedExt != "" {
-				ext = derivedExt
-				if h.verbose {
-					log.Printf("[DEBUG] HandleDownload: derived extension %q from Content-Type %q", ext, contentType)
-				}
-			}
-		}
-	}
-
 	// Always redirect to upstream server (not local)
 	// "local" strategy only affects response URLs in upload/mirror/list, not download redirects
 	// When "local" is set, we still use round-robin to select an upstream server for redirects
-	// Preserve extension from original request if present, or use derived extension
-	redirectPath := hash
-	if ext != "" {
-		redirectPath = hash + ext
-	}
-	redirectURL := fmt.Sprintf("%s/%s", selectedServer, redirectPath)
+	// Use the full path as-is (including extension if present)
+	redirectURL := fmt.Sprintf("%s/%s", selectedServer, path)
 
 	if h.verbose {
 		log.Printf("[DEBUG] HandleDownload: selected server: %s", selectedServer)
-		log.Printf("[DEBUG] HandleDownload: extension from request: %q, redirectPath: %s", ext, redirectPath)
 		log.Printf("[DEBUG] HandleDownload: redirecting to: %s", redirectURL)
 	}
 
@@ -1054,55 +1027,47 @@ func (h *BlossomHandler) HandleHead(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Extract hash from path (remove leading slash)
-	hash := strings.TrimPrefix(r.URL.Path, "/")
+	// Extract path (remove leading slash)
+	path := strings.TrimPrefix(r.URL.Path, "/")
+
+	// Validate path format (must contain a valid hash in the first 64 characters)
+	if err := validatePath(path); err != nil {
+		if h.verbose {
+			log.Printf("[DEBUG] HandleHead: %v", err)
+		}
+		http.Error(w, "Invalid hash format", http.StatusBadRequest)
+		return
+	}
 
 	if h.verbose {
-		log.Printf("[DEBUG] HandleHead: extracted hash: %s", hash)
+		log.Printf("[DEBUG] HandleHead: path: %s", path)
 	}
 
-	// Validate hash format (should be 64 hex characters for SHA256)
-	if len(hash) != 64 {
-		if h.verbose {
-			log.Printf("[DEBUG] HandleHead: invalid hash length: %d", len(hash))
-		}
-		http.Error(w, "Invalid hash format", http.StatusBadRequest)
-		return
-	}
-
-	// Check if hash is valid hex
-	if _, err := hex.DecodeString(hash); err != nil {
-		if h.verbose {
-			log.Printf("[DEBUG] HandleHead: invalid hash format (not hex): %v", err)
-		}
-		http.Error(w, "Invalid hash format", http.StatusBadRequest)
-		return
-	}
-
-	// Look up hash in cache
-	servers, exists := h.cache.Get(hash)
+	// Look up path in cache
+	servers, exists := h.cache.Get(path)
 	if !exists || len(servers) == 0 {
 		if h.verbose {
-			log.Printf("[DEBUG] HandleHead: hash %s not found in cache, checking upstream servers", hash)
+			log.Printf("[DEBUG] HandleHead: path %s not found in cache, checking upstream servers", path)
 		}
-		// Hash not in cache, check upstream servers using HEAD requests
-		servers = h.upstreamManager.CheckHashOnServers(r.Context(), hash, h.config.Server.Timeout)
+		// Path not in cache, check upstream servers using HEAD requests
+		result := h.upstreamManager.CheckPathOnServers(r.Context(), path, h.config.Server.Timeout)
+		servers = result.Servers
 		if len(servers) == 0 {
 			if h.verbose {
-				log.Printf("[DEBUG] HandleHead: hash %s not found on any upstream server", hash)
+				log.Printf("[DEBUG] HandleHead: path %s not found on any upstream server", path)
 			}
 			http.Error(w, "Blob not found", http.StatusNotFound)
 			return
 		}
 		// Update cache with found servers
-		h.cache.Add(hash, servers)
+		h.cache.Add(path, servers)
 		if h.verbose {
-			log.Printf("[DEBUG] HandleHead: hash %s found on %d upstream servers, added to cache", hash, len(servers))
+			log.Printf("[DEBUG] HandleHead: path %s found on %d upstream servers, added to cache", path, len(servers))
 		}
 	}
 
 	if h.verbose {
-		log.Printf("[DEBUG] HandleHead: hash found with %d servers: %v", len(servers), servers)
+		log.Printf("[DEBUG] HandleHead: path found with %d servers: %v", len(servers), servers)
 	}
 
 	// Select the first server that has the blob
@@ -1130,9 +1095,10 @@ func (h *BlossomHandler) HandleHead(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Perform HEAD request using client with timeout
+	// Use the full path (including extension if present) to preserve it in the request
 	headCtx, cancel := context.WithTimeout(r.Context(), h.config.Server.Timeout)
 	defer cancel()
-	resp, err := cl.Head(headCtx, hash)
+	resp, err := cl.Head(headCtx, path)
 	if err != nil {
 		if h.verbose {
 			log.Printf("[DEBUG] HandleHead: HEAD request failed: %v", err)
@@ -1314,42 +1280,37 @@ func (h *BlossomHandler) HandleDelete(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Extract hash from path
-	hash := strings.TrimPrefix(r.URL.Path, "/")
+	// Extract path (remove leading slash)
+	path := strings.TrimPrefix(r.URL.Path, "/")
+
+	// Validate path format (must contain a valid hash in the first 64 characters)
+	if err := validatePath(path); err != nil {
+		if h.verbose {
+			log.Printf("[DEBUG] HandleDelete: %v", err)
+		}
+		http.Error(w, "Invalid hash format", http.StatusBadRequest)
+		return
+	}
+
+	// Extract hash (first 64 characters) for the Delete call
+	// The path may include an extension, but Delete expects just the hash
+	hash := path[:64]
 
 	if h.verbose {
-		log.Printf("[DEBUG] HandleDelete: extracted hash: %s", hash)
-	}
-
-	// Validate hash format
-	if len(hash) != 64 {
-		if h.verbose {
-			log.Printf("[DEBUG] HandleDelete: invalid hash length: %d", len(hash))
-		}
-		http.Error(w, "Invalid hash format", http.StatusBadRequest)
-		return
-	}
-
-	// Check if hash is valid hex
-	if _, err := hex.DecodeString(hash); err != nil {
-		if h.verbose {
-			log.Printf("[DEBUG] HandleDelete: invalid hash format (not hex): %v", err)
-		}
-		http.Error(w, "Invalid hash format", http.StatusBadRequest)
-		return
+		log.Printf("[DEBUG] HandleDelete: path: %s", path)
 	}
 
 	// Get servers that have this blob
-	servers, exists := h.cache.Get(hash)
+	servers, exists := h.cache.Get(path)
 	if !exists {
 		if h.verbose {
-			log.Printf("[DEBUG] HandleDelete: hash not in cache, using all upstream servers")
+			log.Printf("[DEBUG] HandleDelete: path not in cache, using all upstream servers")
 		}
 		// If not in cache, try all upstream servers
 		servers = h.upstreamManager.GetServerURLs()
 	} else {
 		if h.verbose {
-			log.Printf("[DEBUG] HandleDelete: hash found in cache with %d servers: %v", len(servers), servers)
+			log.Printf("[DEBUG] HandleDelete: path found in cache with %d servers: %v", len(servers), servers)
 		}
 	}
 
@@ -1404,9 +1365,9 @@ func (h *BlossomHandler) HandleDelete(w http.ResponseWriter, r *http.Request) {
 
 	// Remove from cache if at least one delete succeeded
 	if successCount > 0 {
-		h.cache.Remove(hash)
+		h.cache.Remove(path)
 		if h.verbose {
-			log.Printf("[DEBUG] HandleDelete: removed hash %s from cache", hash)
+			log.Printf("[DEBUG] HandleDelete: removed path %s from cache", path)
 		}
 		w.WriteHeader(http.StatusNoContent)
 	} else {

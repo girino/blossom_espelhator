@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -50,9 +51,12 @@ func (c *Client) Upload(ctx context.Context, body io.Reader, contentType string,
 	// This prevents Go from using chunked transfer encoding, which some upstream servers reject
 	if contentLength >= 0 {
 		req.ContentLength = contentLength
+		req.Header.Set("Content-Length", strconv.FormatInt(contentLength, 10))
 		if c.verbose {
 			log.Printf("[DEBUG] Client.Upload: set Content-Length to %d", contentLength)
 		}
+	} else if c.verbose {
+		log.Printf("[DEBUG] Client.Upload: Content-Length not provided (value=%d), will use chunked encoding", contentLength)
 	}
 
 	if contentType != "" {
@@ -266,12 +270,13 @@ func (c *Client) GetBaseURL() string {
 	return c.baseURL
 }
 
-// Head performs a HEAD request to check if a blob exists and returns the response
-func (c *Client) Head(ctx context.Context, hash string) (*http.Response, error) {
-	url := fmt.Sprintf("%s/%s", c.baseURL, hash)
+// Head performs a HEAD request to check if a blob exists at the given path and returns the response
+// The path may include an extension (e.g., "hash.mp4")
+func (c *Client) Head(ctx context.Context, path string) (*http.Response, error) {
+	url := fmt.Sprintf("%s/%s", c.baseURL, path)
 
 	if c.verbose {
-		log.Printf("[DEBUG] Client.Head: checking %s for hash %s", c.baseURL, hash)
+		log.Printf("[DEBUG] Client.Head: checking %s for path %s", c.baseURL, path)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, "HEAD", url, nil)

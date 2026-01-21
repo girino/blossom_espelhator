@@ -9,7 +9,6 @@ import (
 	"log"
 	"math/rand"
 	"net/http"
-	"strings"
 	"sync"
 	"time"
 
@@ -993,42 +992,17 @@ func (m *Manager) GetMirrorCapableServers() []string {
 	return mirrorCapableServers
 }
 
-// GetContentTypeFromServer performs a HEAD request to get the Content-Type header for a blob
-// Returns the Content-Type header value (without charset) and an error if the request fails
-func (m *Manager) GetContentTypeFromServer(ctx context.Context, serverURL string, hash string, timeout time.Duration) (string, error) {
-	cl, err := m.GetClient(serverURL)
-	if err != nil {
-		return "", fmt.Errorf("failed to get client for %s: %w", serverURL, err)
-	}
-
-	// Create timeout context for HEAD request
-	headCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-
-	headResp, err := cl.Head(headCtx, hash)
-	if err != nil {
-		return "", fmt.Errorf("HEAD request failed: %w", err)
-	}
-	defer headResp.Body.Close()
-
-	contentType := headResp.Header.Get("Content-Type")
-	if contentType == "" {
-		return "", nil
-	}
-
-	// Parse Content-Type (may contain charset, e.g., "image/png; charset=utf-8")
-	if idx := strings.Index(contentType, ";"); idx != -1 {
-		contentType = strings.TrimSpace(contentType[:idx])
-	}
-
-	return contentType, nil
+// CheckPathOnServersResult contains the result of checking servers for a path
+type CheckPathOnServersResult struct {
+	Servers []string              // List of server URLs that have the blob
+	Headers map[string]http.Header // Map of server URL to response headers (only for servers with blob)
 }
 
-// CheckHashOnServers checks all upstream servers in parallel to see which ones have the blob
-// Returns list of server URLs that have the blob
-func (m *Manager) CheckHashOnServers(ctx context.Context, hash string, timeout time.Duration) []string {
+// CheckPathOnServers checks all upstream servers in parallel to see which ones have the blob at the given path
+// Returns list of server URLs that have the blob and their response headers
+func (m *Manager) CheckPathOnServers(ctx context.Context, path string, timeout time.Duration) CheckPathOnServersResult {
 	if m.verbose {
-		log.Printf("[DEBUG] CheckHashOnServers: checking hash %s on %d servers, timeout=%v", hash, len(m.clients), timeout)
+		log.Printf("[DEBUG] CheckPathOnServers: checking path %s on %d servers, timeout=%v", path, len(m.clients), timeout)
 	}
 
 	// Create a context with timeout
@@ -1039,6 +1013,7 @@ func (m *Manager) CheckHashOnServers(ctx context.Context, hash string, timeout t
 	resultChan := make(chan struct {
 		ServerURL string
 		HasBlob   bool
+		Headers   http.Header
 	}, len(m.clients))
 
 	// Launch parallel HEAD requests
@@ -1049,25 +1024,34 @@ func (m *Manager) CheckHashOnServers(ctx context.Context, hash string, timeout t
 			defer wg.Done()
 
 			if m.verbose {
-				log.Printf("[DEBUG] CheckHashOnServers: checking server %d: %s", idx+1, url)
+				log.Printf("[DEBUG] CheckPathOnServers: checking server %d: %s", idx+1, url)
 			}
 
-			_, err := c.Download(checkCtx, hash)
-			hasBlob := err == nil
+			// Use Head() to get headers, passing the full path (may include extension)
+			headResp, err := c.Head(checkCtx, path)
+			hasBlob := err == nil && headResp != nil && headResp.StatusCode == http.StatusOK
+			
+			var headers http.Header
+			if hasBlob && headResp != nil {
+				headers = headResp.Header
+				headResp.Body.Close()
+			}
 
 			resultChan <- struct {
 				ServerURL string
 				HasBlob   bool
+				Headers   http.Header
 			}{
 				ServerURL: url,
 				HasBlob:   hasBlob,
+				Headers:   headers,
 			}
 
 			if m.verbose {
 				if hasBlob {
-					log.Printf("[DEBUG] CheckHashOnServers: server %d (%s) has the blob", idx+1, url)
+					log.Printf("[DEBUG] CheckPathOnServers: server %d (%s) has the blob", idx+1, url)
 				} else {
-					log.Printf("[DEBUG] CheckHashOnServers: server %d (%s) does not have the blob", idx+1, url)
+					log.Printf("[DEBUG] CheckPathOnServers: server %d (%s) does not have the blob", idx+1, url)
 				}
 			}
 		}(i, cl, m.serverURLs[i])
@@ -1077,19 +1061,26 @@ func (m *Manager) CheckHashOnServers(ctx context.Context, hash string, timeout t
 	wg.Wait()
 	close(resultChan)
 
-	// Collect servers that have the blob
+	// Collect servers that have the blob and their headers
 	serversWithBlob := make([]string, 0)
+	headersMap := make(map[string]http.Header)
 	for result := range resultChan {
 		if result.HasBlob {
 			serversWithBlob = append(serversWithBlob, result.ServerURL)
+			if result.Headers != nil {
+				headersMap[result.ServerURL] = result.Headers
+			}
 		}
 	}
 
 	if m.verbose {
-		log.Printf("[DEBUG] CheckHashOnServers: hash found on %d servers: %v", len(serversWithBlob), serversWithBlob)
+		log.Printf("[DEBUG] CheckPathOnServers: path found on %d servers: %v", len(serversWithBlob), serversWithBlob)
 	}
 
-	return serversWithBlob
+	return CheckPathOnServersResult{
+		Servers: serversWithBlob,
+		Headers: headersMap,
+	}
 }
 
 // UploadPreflightResult represents the result of an upload preflight check

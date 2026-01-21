@@ -29,8 +29,8 @@ func main() {
 		log.Fatalf("Failed to load configuration: %v", err)
 	}
 
-	// Initialize cache
-	cache := cache.New()
+	// Initialize cache with TTL and max size from config
+	cache := cache.New(cfg.Server.CacheTTL, cfg.Server.CacheMaxSize)
 
 	// Initialize stats tracker
 	statsTracker := stats.New(cfg.Server.MaxFailures)
