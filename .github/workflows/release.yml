@@ -1,0 +1,146 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'  # Strict semantic version: v1.2.3 (no SNAPSHOT)
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+
+      - name: Extract version from tag
+        id: version
+        run: |
+          TAG_NAME=${GITHUB_REF#refs/tags/}
+          VERSION=${TAG_NAME#v}
+          echo "tag=$TAG_NAME" >> $GITHUB_OUTPUT
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Tag: $TAG_NAME"
+          echo "Version: $VERSION"
+
+      - name: Download dependencies
+        run: go mod download
+
+      - name: Build binaries
+        run: |
+          mkdir -p dist
+          
+          # Linux amd64
+          GOOS=linux GOARCH=amd64 go build -o dist/blossom_espelhator-linux-amd64 ./cmd/server
+          
+          # Linux arm64
+          GOOS=linux GOARCH=arm64 go build -o dist/blossom_espelhator-linux-arm64 ./cmd/server
+          
+          # Windows amd64
+          GOOS=windows GOARCH=amd64 go build -o dist/blossom_espelhator-windows-amd64.exe ./cmd/server
+          
+          # macOS amd64 (Intel)
+          GOOS=darwin GOARCH=amd64 go build -o dist/blossom_espelhator-darwin-amd64 ./cmd/server
+          
+          # macOS arm64 (Apple Silicon)
+          GOOS=darwin GOARCH=arm64 go build -o dist/blossom_espelhator-darwin-arm64 ./cmd/server
+
+      - name: Create checksums
+        run: |
+          cd dist
+          sha256sum * > checksums.txt
+
+      - name: Create release notes
+        id: release_notes
+        run: |
+          cat > release_notes.md << 'EOF'
+          ## Installation
+
+          ### Docker (Recommended)
+
+          1. **Create configuration file**:
+             ```bash
+             cp config/config.example.yaml config/config.yaml
+             # Edit config/config.yaml with your upstream servers
+             ```
+
+          2. **Choose and copy your docker-compose file**:
+             
+             For production setup:
+             ```bash
+             cp docker-compose.prod.yml docker-compose.yml
+             cp config/nginx.prod.conf config/nginx.conf
+             ```
+             
+             For Cloudflare setup:
+             ```bash
+             cp docker-compose.cloudflare.yml docker-compose.yml
+             cp config/nginx.cloudflare.conf config/nginx.conf
+             ```
+
+          3. **Start the services**:
+             ```bash
+             docker-compose up -d
+             ```
+
+          4. **View logs**:
+             ```bash
+             docker-compose logs -f
+             ```
+
+          ### Manual Installation
+
+          1. **Download the binary** for your platform from the assets below
+
+          2. **Make it executable** (Unix/macOS):
+             ```bash
+             chmod +x blossom_espelhator-*
+             ```
+
+          3. **Create configuration file**:
+             ```bash
+             cp config/config.example.yaml config/config.yaml
+             # Edit config/config.yaml with your upstream servers
+             ```
+
+          4. **Run the server**:
+             ```bash
+             # Linux/macOS
+             ./blossom_espelhator-* -config config/config.yaml
+             
+             # Windows
+             blossom_espelhator-windows-amd64.exe -config config/config.yaml
+             ```
+
+          The server will start on port `7624` by default (configurable in `config.yaml`).
+
+          ## Files
+
+          - Binaries for Linux (amd64, arm64), Windows (amd64), and macOS (amd64, arm64)
+          - `checksums.txt`: SHA256 checksums for all binaries
+
+          ## Documentation
+
+          See [README.md](https://github.com/${{ github.repository }}/blob/main/README.md) for full documentation.
+          EOF
+          
+          echo "notes<<EOF" >> $GITHUB_OUTPUT
+          cat release_notes.md >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          name: Release ${{ steps.version.outputs.tag }}
+          body: ${{ steps.release_notes.outputs.notes }}
+          files: |
+            dist/*
+          draft: false
+          prerelease: false
