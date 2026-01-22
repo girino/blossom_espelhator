@@ -12,6 +12,8 @@ services:
     volumes:
       # Mount nginx configuration (Cloudflare-specific version)
       - ./config/nginx.cloudflare.conf:/etc/nginx/nginx.conf:ro
+      # Mount favicon
+      - ./config/favicon.ico:/etc/nginx/favicon.ico:ro
       # Optional: Mount SSL certificates for HTTPS
       # - ./config/ssl:/etc/nginx/ssl:ro
     depends_on:
