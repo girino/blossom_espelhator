@@ -60,11 +60,13 @@ The project includes Docker support with docker-compose for easy deployment.
    For production setup (simple, direct access):
    ```bash
    cp docker-compose.prod.yml docker-compose.yml
+   cp config/nginx.prod.conf config/nginx.conf
    ```
    
    For Cloudflare setup (includes nginx and cloudflared):
    ```bash
    cp docker-compose.cloudflare.yml docker-compose.yml
+   cp config/nginx.cloudflare.conf config/nginx.conf
    ```
    
    Then edit `docker-compose.yml` if needed (ports, environment variables, etc.)
@@ -124,9 +126,10 @@ The `docker-compose.cloudflare.yml` file provides a complete setup for deploying
 
 To use the Cloudflare setup:
 
-1. Copy the Cloudflare compose file:
+1. Copy the Cloudflare compose file and nginx config:
    ```bash
    cp docker-compose.cloudflare.yml docker-compose.yml
+   cp config/nginx.cloudflare.conf config/nginx.conf
    ```
 
 2. Copy and edit `.env` file in the current directory (where docker-compose.yml is):
