@@ -1,0 +1,73 @@
+name: Build and Push Docker Image
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'           # Matches v1.2.3
+      - 'v*.*.*-SNAPSHOT'  # Matches v1.2.3-SNAPSHOT
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract version from tag
+        id: version
+        run: |
+          TAG_NAME=${GITHUB_REF#refs/tags/}
+          echo "tag=$TAG_NAME" >> $GITHUB_OUTPUT
+          
+          # Remove 'v' prefix if present
+          VERSION=${TAG_NAME#v}
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          
+          # Check if it's a SNAPSHOT
+          if [[ "$VERSION" == *"-SNAPSHOT"* ]]; then
+            echo "is_snapshot=true" >> $GITHUB_OUTPUT
+            echo "additional_tag=snapshot" >> $GITHUB_OUTPUT
+          else
+            echo "is_snapshot=false" >> $GITHUB_OUTPUT
+            echo "additional_tag=latest" >> $GITHUB_OUTPUT
+          fi
+          
+          echo "Tag: $TAG_NAME"
+          echo "Version: $VERSION"
+          echo "Is SNAPSHOT: ${{ steps.version.outputs.is_snapshot }}"
+          echo "Additional tag: ${{ steps.version.outputs.additional_tag }}"
+
+      - name: Build and push Docker image
+        id: build
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.additional_tag }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+        # Note: SNAPSHOT versions only tag as 'snapshot', not 'latest'
+        # Only pure semantic versions (vX.X.X) update the 'latest' tag
+
+      - name: Image digest
+        run: echo "Image pushed with digest ${{ steps.build.outputs.digest }}"
