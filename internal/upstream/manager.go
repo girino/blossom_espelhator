@@ -73,8 +73,7 @@ func (ew *errorTolerantWriter) Close() error {
 
 // Manager manages upstream Blossom servers
 type Manager struct {
-	clients            []*client.Client // Clients for download/HEAD/DELETE (regular timeout)
-	uploadClients      []*client.Client // Clients for uploads (longer timeout for large files)
+	clients            []*client.Client // HTTP clients with no timeout (timeouts controlled via context)
 	serverURLs         []string
 	serverPriorities   []int                // Priority for each server (indexed same as clients/serverURLs)
 	serverCapabilities []serverCapabilities // Capabilities for each server (indexed same as clients/serverURLs)
@@ -118,20 +117,15 @@ func New(cfg *config.Config, verbose bool) (*Manager, error) {
 	}
 
 	clients := make([]*client.Client, 0, len(cfg.UpstreamServers))
-	uploadClients := make([]*client.Client, 0, len(cfg.UpstreamServers))
 	serverURLs := make([]string, 0, len(cfg.UpstreamServers))
 	serverPriorities := make([]int, 0, len(cfg.UpstreamServers))
 	capabilities := make([]serverCapabilities, 0, len(cfg.UpstreamServers))
 
 	for _, server := range cfg.UpstreamServers {
-		// Create clients with regular timeout for download/HEAD/DELETE
-		cl := client.New(server.URL, cfg.Server.Timeout, verbose)
+		// Create clients with no timeout - timeouts are controlled via context in each request
+		// This allows connection reuse and better performance
+		cl := client.New(server.URL, 0, verbose)
 		clients = append(clients, cl)
-
-		// Create separate clients with upload timeout for uploads
-		// Use min upload timeout for HTTP client timeout (the actual request timeout is handled by context)
-		uploadCl := client.New(server.URL, cfg.Server.MaxUploadTimeout, verbose)
-		uploadClients = append(uploadClients, uploadCl)
 
 		serverURLs = append(serverURLs, server.URL)
 		serverPriorities = append(serverPriorities, server.Priority)
@@ -155,7 +149,6 @@ func New(cfg *config.Config, verbose bool) (*Manager, error) {
 
 	return &Manager{
 		clients:            clients,
-		uploadClients:      uploadClients,
 		serverURLs:         serverURLs,
 		serverPriorities:   serverPriorities,
 		serverCapabilities: capabilities,
@@ -205,7 +198,7 @@ func (m *Manager) UploadParallel(ctx context.Context, body io.Reader, contentTyp
 
 	// Launch parallel uploads
 	var wg sync.WaitGroup
-	for i, cl := range m.uploadClients {
+	for i, cl := range m.clients {
 		wg.Add(1)
 		go func(idx int, c *client.Client, url string) {
 			defer wg.Done()
@@ -328,7 +321,7 @@ func (m *Manager) UploadParallel(ctx context.Context, body io.Reader, contentTyp
 // Returns the list of successful servers with their response bodies and an error if fewer than minUploadServers succeeded
 func (m *Manager) UploadParallelStreaming(ctx context.Context, body io.Reader, contentType string, contentLength int64, headers map[string]string, timeout time.Duration) ([]UploadResultWithResponse, error) {
 	if m.verbose {
-		log.Printf("[DEBUG] UploadParallelStreaming: starting streaming parallel upload to %d servers", len(m.uploadClients))
+		log.Printf("[DEBUG] UploadParallelStreaming: starting streaming parallel upload to %d servers", len(m.clients))
 		log.Printf("[DEBUG] UploadParallelStreaming: content-type=%s, headers=%v, timeout=%v", contentType, headers, timeout)
 	}
 
@@ -341,17 +334,17 @@ func (m *Manager) UploadParallelStreaming(ctx context.Context, body io.Reader, c
 		reader *io.PipeReader
 		writer *io.PipeWriter
 	}
-	pipes := make([]pipeData, len(m.uploadClients))
+	pipes := make([]pipeData, len(m.clients))
 	for i := range pipes {
 		pipes[i].reader, pipes[i].writer = io.Pipe()
 	}
 
 	// Channel to collect results
-	resultChan := make(chan UploadResult, len(m.uploadClients))
+	resultChan := make(chan UploadResult, len(m.clients))
 
 	// Launch parallel uploads - each one reads from its pipe
 	var wg sync.WaitGroup
-	for i, cl := range m.uploadClients {
+	for i, cl := range m.clients {
 		wg.Add(1)
 		go func(idx int, c *client.Client, url string, pipeReader *io.PipeReader) {
 			defer wg.Done()
@@ -586,11 +579,10 @@ func (m *Manager) MirrorParallel(ctx context.Context, body io.Reader, contentTyp
 	defer cancel()
 
 	// Launch parallel mirror requests (only to capable servers)
-	// Use uploadClients instead of regular clients since mirrors need longer timeouts like uploads
 	var wg sync.WaitGroup
 	for _, idx := range mirrorCapableIndices {
 		wg.Add(1)
-		cl := m.uploadClients[idx]
+		cl := m.clients[idx]
 		url := m.serverURLs[idx]
 		go func(serverIdx int, c *client.Client, serverURL string) {
 			defer wg.Done()
