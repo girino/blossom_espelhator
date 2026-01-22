@@ -28,10 +28,13 @@ services:
       start_period: 10s
 
   blossom-espelhator:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    image: blossom-espelhator:latest
+    # Use pre-built image from GitHub Container Registry
+    image: ghcr.io/girino/blossom_espelhator:latest
+    # Uncomment below to build from source instead
+    # build:
+    #   context: .
+    #   dockerfile: Dockerfile
+    # image: blossom-espelhator:latest
     container_name: blossom-espelhator
     restart: unless-stopped
     command: ["./blossom_espelhator", "-config", "/app/config/config.yaml", "-v"]
