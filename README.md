@@ -12,10 +12,12 @@ A media server proxy for the Blossom protocol (used by Nostr clients) that forwa
 - **Unified API**: Single endpoint for multiple upstream Blossom servers
 - **All Blossom Endpoints**: Supports upload, download, list, delete, mirror, and preflight checks
 - **BUD-08 & NIP-94**: Returns proper tags with `nip94` array including URL tags and NIP-94 metadata
-- **Minimal Cache**: In-memory cache for hash-to-server mappings
+- **Streaming Uploads**: Uses streaming uploads to prevent authentication expiration on large files
+- **Alternative Addresses**: Supports direct IP connections for upstream servers behind Cloudflare/proxies
+- **Minimal Cache**: In-memory cache for hash-to-server mappings with configurable TTL and size limits
 - **Thread-safe Operations**: Safe for concurrent requests
 - **Web Dashboard**: Built-in home page with health status, statistics, memory, and goroutine monitoring
-- **Docker Support**: Ready-to-use Dockerfile and docker-compose configuration with autoheal
+- **Docker Support**: Ready-to-use Dockerfile and docker-compose configurations (production and Cloudflare setups)
 
 ## Architecture
 
@@ -53,32 +55,53 @@ The project includes Docker support with docker-compose for easy deployment.
    # Edit config/config.yaml with your upstream servers
    ```
 
-2. **Start the services**:
+2. **Choose and copy your docker-compose file**:
+   
+   For production setup (simple, direct access):
    ```bash
-   docker-compose -f docker-compose.prod.yml up -d
+   cp docker-compose.prod.yml docker-compose.yml
+   ```
+   
+   For Cloudflare setup (includes nginx and cloudflared):
+   ```bash
+   cp docker-compose.cloudflare.yml docker-compose.yml
+   ```
+   
+   Then edit `docker-compose.yml` if needed (ports, environment variables, etc.)
+
+3. **Start the services**:
+   ```bash
+   docker-compose up -d
    ```
 
-   This starts:
-   - **blossom-espelhator**: The proxy server (accessible on port `7624`)
-   - **autoheal**: Monitors the proxy container and restarts it if unhealthy
+   Production setup starts:
+   - **nginx**: Reverse proxy (accessible on port `7624`)
+   - **blossom-espelhator**: The proxy server (internal, accessed via nginx)
+   - **autoheal**: Monitors containers and restarts them if unhealthy
+   
+   Cloudflare setup starts:
+   - **blossom-espelhator**: The proxy server (internal, accessed via nginx)
+   - **nginx**: Reverse proxy with Cloudflare-specific configuration
+   - **cloudflared**: Cloudflare tunnel (requires `CLOUDFLARE_TUNNEL_TOKEN` in `config/.env`)
+   - **autoheal**: Monitors containers and restarts if unhealthy
 
-3. **View logs**:
+4. **View logs**:
    ```bash
    # All services
-   docker-compose -f docker-compose.prod.yml logs -f
+   docker-compose logs -f
    
    # Proxy only
-   docker-compose -f docker-compose.prod.yml logs -f blossom-espelhator
+   docker-compose logs -f blossom-espelhator
    ```
 
-4. **Check status**:
+5. **Check status**:
    ```bash
-   docker-compose -f docker-compose.prod.yml ps
+   docker-compose ps
    ```
 
-5. **Stop services**:
+6. **Stop services**:
    ```bash
-   docker-compose -f docker-compose.prod.yml down
+   docker-compose down
    ```
 
 #### Docker Setup Features
@@ -91,9 +114,39 @@ The project includes Docker support with docker-compose for easy deployment.
 - **Read-only config mount**: Configuration file is mounted read-only for security
 - **Non-root user**: Container runs as unprivileged `appuser`
 
+#### Cloudflare Setup
+
+The `docker-compose.cloudflare.yml` file provides a complete setup for deploying behind Cloudflare:
+
+- **nginx**: Reverse proxy with Cloudflare-specific configuration (handles real IP headers, etc.)
+- **cloudflared**: Cloudflare tunnel for secure connectivity
+- **Environment**: Requires `CLOUDFLARE_TUNNEL_TOKEN` in `.env` file (in the current directory)
+
+To use the Cloudflare setup:
+
+1. Copy the Cloudflare compose file:
+   ```bash
+   cp docker-compose.cloudflare.yml docker-compose.yml
+   ```
+
+2. Copy and edit `.env` file in the current directory (where docker-compose.yml is):
+   ```bash
+   cp config/.env.example .env
+   # Edit .env and set your CLOUDFLARE_TUNNEL_TOKEN
+   ```
+   
+   Edit `.env` and set your `CLOUDFLARE_TUNNEL_TOKEN` value.
+
+3. Start services:
+   ```bash
+   docker-compose up -d
+   ```
+
+4. The proxy is accessible via the Cloudflare tunnel URL configured in your Cloudflare dashboard.
+
 #### Custom Port
 
-The default host port is `7624` (maps to container port `8080`). To change it, edit `docker-compose.prod.yml`:
+The default host port is `7624` (maps to container port `8080`). To change it, edit `docker-compose.yml`:
 
 ```yaml
 ports:
@@ -102,7 +155,7 @@ ports:
 
 #### Autoheal Configuration
 
-The autoheal service monitors the proxy container and restarts it if it becomes unhealthy. To configure webhooks or adjust settings, edit the `autoheal` service in `docker-compose.prod.yml`:
+The autoheal service monitors the proxy container and restarts it if it becomes unhealthy. To configure webhooks or adjust settings, edit the `autoheal` service in `docker-compose.yml`:
 
 ```yaml
 autoheal:
@@ -133,14 +186,23 @@ upstream_servers:
     priority: 2
     supports_mirror: false         # Server doesn't support mirror
     supports_upload_head: true
+  # Example: Server behind Cloudflare with direct IP access
+  - url: "https://blossom3.example.com"
+    alternative_address: "https://1.2.3.4"  # Direct IP or alternative hostname
+    priority: 3
+    supports_mirror: true
+    supports_upload_head: true
 
 # Proxy server configuration
 server:
   listen_addr: ":8080"             # Address to listen on
   min_upload_servers: 2            # Minimum servers that must succeed for upload
   redirect_strategy: "round_robin" # Server selection strategy (see Redirect Strategies below)
+  download_redirect_strategy: ""   # Optional: separate strategy for downloads (defaults to redirect_strategy)
   base_url: ""                     # Base URL for local strategy (optional, see Redirect Strategies)
-  timeout: 30s                     # Timeout for upstream requests
+  timeout: 30s                     # Timeout for download/HEAD/DELETE requests
+  min_upload_timeout: 5m           # Minimum timeout for upload requests (default: 5 minutes)
+  max_upload_timeout: 30m          # Maximum timeout for upload requests (default: 30 minutes)
   max_retries: 3                   # Maximum retries for failed requests
   
   # Health monitoring configuration
@@ -150,6 +212,10 @@ server:
   max_goroutines: 1000             # Maximum allowed goroutines before marking system unhealthy
   max_memory_bytes: 536870912      # Maximum memory usage in bytes (512 MB) before marking system unhealthy
   
+  # Cache configuration
+  cache_ttl: 5m                    # Time-to-live for cache entries (default: 5 minutes)
+  cache_max_size: 1000              # Maximum number of cache entries (default: 1000)
+  
   # Authentication: List of allowed pubkeys (hex format or npub bech32 format)
   # If empty or not set, authentication is disabled
   # See Authentication Configuration section for details
@@ -158,7 +224,7 @@ server:
 
 ### Redirect Strategies
 
-The `redirect_strategy` option controls how the proxy selects upstream servers for downloads and response URLs:
+The `redirect_strategy` option controls how the proxy selects upstream servers for upload/mirror/list responses and downloads:
 
 - **`round_robin`** (default): Cycles through available servers in order
 - **`random`**: Randomly selects from available servers
@@ -167,6 +233,20 @@ The `redirect_strategy` option controls how the proxy selects upstream servers f
 - **`local`**: Returns local URLs in response bodies (upload/mirror/list). Downloads still redirect to upstream servers using round-robin. Local URLs use format `base_url/sha256.ext` where:
   - `base_url` is from config if set, otherwise derived from request
   - Extension is derived from mime type or file extension, or omitted if unavailable
+
+#### Download Redirect Strategy
+
+The `download_redirect_strategy` option (optional) allows using a different strategy specifically for GET (download) requests:
+
+- If not set or empty, falls back to `redirect_strategy`
+- Useful when you want different behavior for downloads vs. uploads/mirrors/lists
+- Example: Use `"priority"` for downloads while using `"health_based"` for uploads
+
+```yaml
+server:
+  redirect_strategy: "health_based"      # For upload/mirror/list responses
+  download_redirect_strategy: "priority" # For download redirects
+```
 
 ### Base URL Configuration
 
@@ -179,10 +259,39 @@ The `base_url` option (optional) is used when `redirect_strategy` is `"local"`:
 
 ### Server Configuration
 
-- `url`: The upstream server URL (required)
+- `url`: The upstream server URL (required) - used for building URLs in responses
+- `alternative_address`: Optional alternative address for actual HTTP connections (bypasses Cloudflare/proxy limits)
+  - If set, this address is used for all HTTP connections to the upstream server
+  - The official `url` is still used when building URLs for responses
+  - Useful when upstream servers are behind Cloudflare which limits payload size, but you know their real IP
+  - Example: `"https://1.2.3.4"` or `"https://direct.example.com"`
 - `priority`: Priority number for server selection when using `priority` strategy (lower is better, required)
 - `supports_mirror`: If `true`, the server supports BUD-04 `/mirror` endpoint (optional, defaults to `false`)
 - `supports_upload_head`: If `true`, the server supports BUD-06 `HEAD /upload` preflight checks (optional, defaults to `false`)
+
+### Upload Timeout Configuration
+
+Upload timeouts are calculated dynamically based on the authorization event's expiration timestamp:
+
+- **Calculation**: Timeout = `expiration_timestamp - current_time - 30_seconds_buffer`
+- **Clamping**: The calculated timeout is clamped between `min_upload_timeout` (minimum) and `max_upload_timeout` (maximum)
+- **Default values**: 
+  - `min_upload_timeout`: 5 minutes (prevents too-short timeouts)
+  - `max_upload_timeout`: 30 minutes (prevents extremely long timeouts)
+- **Purpose**: Prevents authentication expiration on large file uploads while avoiding excessive timeouts
+
+If no expiration timestamp is provided in the authorization event, `min_upload_timeout` is used.
+
+### Cache Configuration
+
+The in-memory cache stores hash-to-server mappings to quickly determine which upstream servers have a blob:
+
+- **`cache_ttl`**: Time-to-live for cache entries (default: 5 minutes)
+  - Entries are automatically removed after this duration
+  - Format: `"5m"`, `"10m"`, `"1h"`, etc.
+- **`cache_max_size`**: Maximum number of entries in the cache (default: 1000)
+  - When the cache reaches this size, least recently used (LRU) entries are evicted
+  - Helps prevent unbounded memory growth
 
 ### Authentication Configuration
 
@@ -307,7 +416,10 @@ Errors are returned with `X-Reason` header per BUD-01:
 
 - **PUT /upload** - Upload a file (forwards to multiple upstream servers)
   - Requires Nostr authentication (kind 24242 event) if `allowed_pubkeys` is configured
-  - Forwards to at least `min_upload_servers` upstream servers
+  - Uses streaming uploads to prevent authentication expiration on large files
+  - Upload timeout is calculated from authorization event's expiration timestamp (clamped between min/max)
+  - Forwards to at least `min_upload_servers` upstream servers in parallel
+  - Calculates SHA256 hash during upload (streaming) to avoid reading file twice
   - Returns response with `nip94` array containing URLs and metadata
   - If `redirect_strategy` is `"local"`, response URL uses local format (`base_url/sha256.ext`)
 
@@ -332,7 +444,8 @@ Errors are returned with `X-Reason` header per BUD-01:
 
 - **GET /<sha256>.<ext>** - Download file
   - Redirects to one of the upstream servers that has the file
-  - Uses configured redirect strategy (round_robin, random, priority, health_based, or local with round-robin)
+  - Uses `download_redirect_strategy` if configured, otherwise falls back to `redirect_strategy`
+  - Available strategies: round_robin, random, priority, health_based, or local (uses round-robin for downloads)
   - Authentication optional (not enforced by proxy, may be required by upstream servers)
 
 - **HEAD /<sha256>.<ext>** - Check file existence
@@ -464,11 +577,15 @@ Configure your Nostr client to use this proxy server:
 
 ### Helper Scripts
 
-The `scripts/` directory includes helper scripts:
+The `scripts/` directory includes helper scripts (see `scripts/README.md` for detailed documentation):
 
-- `gen_auth_header.sh` - Generate Nostr authentication headers for API requests
+- `gen_auth_header.sh` - Generate Nostr authentication headers for API requests (NIP-98 HTTP Schnorr Auth)
+  - Requires `nak` (Nostr CLI tool) and `jq`
+  - Generates `Authorization: Nostr <base64>` headers for authenticated requests
+  - Supports all Blossom endpoints (upload, mirror, delete, list)
 - `upload_file.sh` - Upload files with proper authentication
 - `mirror_hash.sh` - Mirror blobs using the mirror endpoint
+- `list_pubkey.sh` - List blobs for a pubkey with authentication
 
 ## Development
 

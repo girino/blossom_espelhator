@@ -59,7 +59,7 @@ services:
     restart: unless-stopped
     command: tunnel --metrics localhost:2000 --no-autoupdate run --token ${CLOUDFLARE_TUNNEL_TOKEN}
     env_file:
-      - config/.env
+      - .env
     depends_on:
       - nginx
     networks:
