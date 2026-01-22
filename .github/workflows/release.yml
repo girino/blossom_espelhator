@@ -65,7 +65,7 @@ jobs:
 
           ### Docker (Recommended)
 
-          1. **Create configuration file**:
+          1. **Create configuration file** (required):
              ```bash
              cp config/config.example.yaml config/config.yaml
              # Edit config/config.yaml with your upstream servers
@@ -85,12 +85,19 @@ jobs:
              cp config/nginx.cloudflare.conf config/nginx.conf
              ```
 
-          3. **Start the services**:
+          3. **Create .env file** (required for Cloudflare setup only):
+             ```bash
+             cp config/.env.example .env
+             # Edit .env and add your CLOUDFLARE_TUNNEL_TOKEN
+             # Get your token from: https://one.dash.cloudflare.com/
+             ```
+
+          4. **Start the services**:
              ```bash
              docker-compose up -d
              ```
 
-          4. **View logs**:
+          5. **View logs**:
              ```bash
              docker-compose logs -f
              ```
@@ -104,7 +111,7 @@ jobs:
              chmod +x blossom_espelhator-*
              ```
 
-          3. **Create configuration file**:
+          3. **Create configuration file** (required):
              ```bash
              cp config/config.example.yaml config/config.yaml
              # Edit config/config.yaml with your upstream servers
