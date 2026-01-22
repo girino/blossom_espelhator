@@ -19,6 +19,12 @@ type UpstreamServer struct {
 	URL      string `yaml:"url"`
 	Priority int    `yaml:"priority"`
 
+	// Alternative address for direct connections (bypasses Cloudflare/proxy)
+	// If set, this address will be used for actual HTTP connections
+	// The official URL will still be used when building URLs for responses
+	// Example: "https://1.2.3.4" or "https://direct.example.com"
+	AlternativeAddress string `yaml:"alternative_address,omitempty"`
+
 	// Capabilities - which endpoints this server supports
 	// If not specified in config, defaults are:
 	// - supports_mirror: false (not all servers support BUD-04 mirror)

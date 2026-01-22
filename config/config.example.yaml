@@ -14,6 +14,14 @@ upstream_servers:
   - url: "https://blossom3.example.com"
     priority: 3
     # If not specified, defaults to false (optional endpoints are opt-in)
+  # Example: Server behind Cloudflare with direct IP access
+  # The alternative_address is used for actual HTTP connections (bypasses Cloudflare limits)
+  # The official URL is still used when building URLs for responses
+  - url: "https://blossom4.example.com"
+    alternative_address: "https://1.2.3.4"  # Direct IP or alternative hostname
+    priority: 4
+    supports_mirror: true
+    supports_upload_head: true
 
 # Proxy server configuration
 server:

@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -14,20 +15,53 @@ import (
 
 // Client is an HTTP client for communicating with Blossom servers
 type Client struct {
-	httpClient *http.Client
-	baseURL    string
-	verbose    bool
+	httpClient   *http.Client
+	baseURL      string // Used for building URLs in responses
+	connectURL   string // Used for actual HTTP connections (if set, otherwise uses baseURL)
+	verbose      bool
 }
 
 // New creates a new Blossom client
-func New(baseURL string, timeout time.Duration, verbose bool) *Client {
-	return &Client{
+// baseURL is the official URL used for building URLs in responses
+// connectURL is an optional alternative address for actual connections (if empty, uses baseURL)
+func New(baseURL string, connectURL string, timeout time.Duration, verbose bool) *Client {
+	client := &Client{
 		httpClient: &http.Client{
 			Timeout: timeout,
 		},
 		baseURL: baseURL,
 		verbose: verbose,
 	}
+	
+	// If connectURL is provided, use it; otherwise use baseURL for connections
+	if connectURL != "" {
+		client.connectURL = connectURL
+	} else {
+		client.connectURL = baseURL
+	}
+	
+	return client
+}
+
+// getConnectURL returns the URL to use for making HTTP connections
+// It replaces the hostname in baseURL with the hostname from connectURL
+func (c *Client) getConnectURL(path string) (string, error) {
+	// If connectURL is the same as baseURL, just use baseURL
+	if c.connectURL == c.baseURL {
+		return fmt.Sprintf("%s%s", c.baseURL, path), nil
+	}
+	
+	// Parse the connect URL
+	connectParsed, err := url.Parse(c.connectURL)
+	if err != nil {
+		return "", fmt.Errorf("failed to parse connectURL: %w", err)
+	}
+	
+	// Build the connection URL using the connectURL's scheme and host, with the provided path
+	// The path parameter already includes the full path (e.g., "/upload" or "/hash")
+	connectURL := fmt.Sprintf("%s://%s%s", connectParsed.Scheme, connectParsed.Host, path)
+	
+	return connectURL, nil
 }
 
 // Upload uploads a blob to the Blossom server
@@ -35,14 +69,17 @@ func New(baseURL string, timeout time.Duration, verbose bool) *Client {
 // contentLength should be set if known (>= 0), otherwise -1 to use chunked encoding
 // Returns the response body on success
 func (c *Client) Upload(ctx context.Context, body io.Reader, contentType string, contentLength int64, headers map[string]string) ([]byte, error) {
-	url := fmt.Sprintf("%s/upload", c.baseURL)
+	connectURL, err := c.getConnectURL("/upload")
+	if err != nil {
+		return nil, err
+	}
 
 	if c.verbose {
-		log.Printf("[DEBUG] Client.Upload: %s - method=PUT, content-type=%s, content-length=%d", c.baseURL, contentType, contentLength)
+		log.Printf("[DEBUG] Client.Upload: %s (connect via %s) - method=PUT, content-type=%s, content-length=%d", c.baseURL, connectURL, contentType, contentLength)
 		log.Printf("[DEBUG] Client.Upload: headers=%v", headers)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "PUT", url, body)
+	req, err := http.NewRequestWithContext(ctx, "PUT", connectURL, body)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
@@ -72,7 +109,7 @@ func (c *Client) Upload(ctx context.Context, body io.Reader, contentType string,
 	}
 
 	if c.verbose {
-		log.Printf("[DEBUG] Client.Upload: sending request to %s", url)
+		log.Printf("[DEBUG] Client.Upload: sending request to %s", connectURL)
 	}
 
 	startTime := time.Now()
@@ -121,14 +158,21 @@ func (c *Client) Upload(ctx context.Context, body io.Reader, contentType string,
 }
 
 // Download checks if a blob exists at the server (returns the URL)
+// Returns the official baseURL, not the connection URL
 func (c *Client) Download(ctx context.Context, hash string) (string, error) {
-	url := fmt.Sprintf("%s/%s", c.baseURL, hash)
+	connectURL, err := c.getConnectURL(fmt.Sprintf("/%s", hash))
+	if err != nil {
+		return "", err
+	}
+	
+	// Return the official URL, not the connection URL
+	officialURL := fmt.Sprintf("%s/%s", c.baseURL, hash)
 
 	if c.verbose {
-		log.Printf("[DEBUG] Client.Download: checking %s for hash %s", c.baseURL, hash)
+		log.Printf("[DEBUG] Client.Download: checking %s (connect via %s) for hash %s", c.baseURL, connectURL, hash)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "HEAD", url, nil)
+	req, err := http.NewRequestWithContext(ctx, "HEAD", connectURL, nil)
 	if err != nil {
 		return "", fmt.Errorf("failed to create request: %w", err)
 	}
@@ -147,7 +191,7 @@ func (c *Client) Download(ctx context.Context, hash string) (string, error) {
 	}
 
 	if resp.StatusCode == http.StatusOK {
-		return url, nil
+		return officialURL, nil
 	}
 
 	return "", fmt.Errorf("blob not found: status %d", resp.StatusCode)
@@ -155,13 +199,16 @@ func (c *Client) Download(ctx context.Context, hash string) (string, error) {
 
 // List retrieves the list of blobs for a given pubkey
 func (c *Client) List(ctx context.Context, pubkey string) ([]byte, error) {
-	url := fmt.Sprintf("%s/list/%s", c.baseURL, pubkey)
-
-	if c.verbose {
-		log.Printf("[DEBUG] Client.List: listing blobs for pubkey %s on %s", pubkey, c.baseURL)
+	connectURL, err := c.getConnectURL(fmt.Sprintf("/list/%s", pubkey))
+	if err != nil {
+		return nil, err
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if c.verbose {
+		log.Printf("[DEBUG] Client.List: listing blobs for pubkey %s on %s (connect via %s)", pubkey, c.baseURL, connectURL)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "GET", connectURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
@@ -197,14 +244,17 @@ func (c *Client) List(ctx context.Context, pubkey string) ([]byte, error) {
 
 // Delete deletes a blob from the server
 func (c *Client) Delete(ctx context.Context, hash string, headers map[string]string) error {
-	url := fmt.Sprintf("%s/%s", c.baseURL, hash)
+	connectURL, err := c.getConnectURL(fmt.Sprintf("/%s", hash))
+	if err != nil {
+		return err
+	}
 
 	if c.verbose {
-		log.Printf("[DEBUG] Client.Delete: deleting hash %s from %s", hash, c.baseURL)
+		log.Printf("[DEBUG] Client.Delete: deleting hash %s from %s (connect via %s)", hash, c.baseURL, connectURL)
 		log.Printf("[DEBUG] Client.Delete: headers=%v", headers)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "DELETE", url, nil)
+	req, err := http.NewRequestWithContext(ctx, "DELETE", connectURL, nil)
 	if err != nil {
 		return fmt.Errorf("failed to create request: %w", err)
 	}
@@ -248,9 +298,12 @@ func (c *Client) Delete(ctx context.Context, hash string, headers map[string]str
 // CheckHealth checks if the server is reachable
 func (c *Client) CheckHealth(ctx context.Context) error {
 	// Try to access a non-existent blob to check if server responds
-	url := fmt.Sprintf("%s/0000000000000000000000000000000000000000000000000000000000000000", c.baseURL)
+	connectURL, err := c.getConnectURL("/0000000000000000000000000000000000000000000000000000000000000000")
+	if err != nil {
+		return err
+	}
 
-	req, err := http.NewRequestWithContext(ctx, "HEAD", url, nil)
+	req, err := http.NewRequestWithContext(ctx, "HEAD", connectURL, nil)
 	if err != nil {
 		return fmt.Errorf("failed to create request: %w", err)
 	}
@@ -273,13 +326,16 @@ func (c *Client) GetBaseURL() string {
 // Head performs a HEAD request to check if a blob exists at the given path and returns the response
 // The path may include an extension (e.g., "hash.mp4")
 func (c *Client) Head(ctx context.Context, path string) (*http.Response, error) {
-	url := fmt.Sprintf("%s/%s", c.baseURL, path)
-
-	if c.verbose {
-		log.Printf("[DEBUG] Client.Head: checking %s for path %s", c.baseURL, path)
+	connectURL, err := c.getConnectURL(fmt.Sprintf("/%s", path))
+	if err != nil {
+		return nil, err
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "HEAD", url, nil)
+	if c.verbose {
+		log.Printf("[DEBUG] Client.Head: checking %s (connect via %s) for path %s", c.baseURL, connectURL, path)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "HEAD", connectURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
@@ -303,13 +359,16 @@ func (c *Client) Head(ctx context.Context, path string) (*http.Response, error) 
 // The request should include headers: X-SHA-256, X-Content-Length, X-Content-Type
 // Returns the HTTP response with headers including X-Reason if rejected
 func (c *Client) HeadUpload(ctx context.Context, headers map[string]string) (*http.Response, error) {
-	url := fmt.Sprintf("%s/upload", c.baseURL)
-
-	if c.verbose {
-		log.Printf("[DEBUG] Client.HeadUpload: checking %s with headers: %v", c.baseURL, headers)
+	connectURL, err := c.getConnectURL("/upload")
+	if err != nil {
+		return nil, err
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "HEAD", url, nil)
+	if c.verbose {
+		log.Printf("[DEBUG] Client.HeadUpload: checking %s (connect via %s) with headers: %v", c.baseURL, connectURL, headers)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "HEAD", connectURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
@@ -323,7 +382,7 @@ func (c *Client) HeadUpload(ctx context.Context, headers map[string]string) (*ht
 	}
 
 	if c.verbose {
-		log.Printf("[DEBUG] Client.HeadUpload: sending HEAD request to %s", url)
+		log.Printf("[DEBUG] Client.HeadUpload: sending HEAD request to %s", connectURL)
 	}
 
 	startTime := time.Now()
@@ -349,14 +408,17 @@ func (c *Client) HeadUpload(ctx context.Context, headers map[string]string) (*ht
 // Headers should include authentication (Nostr event)
 // Returns the response body on success
 func (c *Client) Mirror(ctx context.Context, body io.Reader, contentType string, headers map[string]string) ([]byte, error) {
-	url := fmt.Sprintf("%s/mirror", c.baseURL)
+	connectURL, err := c.getConnectURL("/mirror")
+	if err != nil {
+		return nil, err
+	}
 
 	if c.verbose {
-		log.Printf("[DEBUG] Client.Mirror: %s - method=PUT, content-type=%s", c.baseURL, contentType)
+		log.Printf("[DEBUG] Client.Mirror: %s (connect via %s) - method=PUT, content-type=%s", c.baseURL, connectURL, contentType)
 		log.Printf("[DEBUG] Client.Mirror: headers=%v", headers)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "PUT", url, body)
+	req, err := http.NewRequestWithContext(ctx, "PUT", connectURL, body)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
@@ -374,7 +436,7 @@ func (c *Client) Mirror(ctx context.Context, body io.Reader, contentType string,
 	}
 
 	if c.verbose {
-		log.Printf("[DEBUG] Client.Mirror: sending request to %s", url)
+		log.Printf("[DEBUG] Client.Mirror: sending request to %s", connectURL)
 	}
 
 	startTime := time.Now()

@@ -124,7 +124,8 @@ func New(cfg *config.Config, verbose bool) (*Manager, error) {
 	for _, server := range cfg.UpstreamServers {
 		// Create clients with no timeout - timeouts are controlled via context in each request
 		// This allows connection reuse and better performance
-		cl := client.New(server.URL, 0, verbose)
+		// Use alternative_address for connections if provided, otherwise use the official URL
+		cl := client.New(server.URL, server.AlternativeAddress, 0, verbose)
 		clients = append(clients, cl)
 
 		serverURLs = append(serverURLs, server.URL)
@@ -142,8 +143,14 @@ func New(cfg *config.Config, verbose bool) (*Manager, error) {
 		log.Printf("[DEBUG] Upstream manager initialized with %d servers, min_upload_servers=%d, strategy=%s",
 			len(serverURLs), cfg.Server.MinUploadServers, cfg.Server.RedirectStrategy)
 		for i, url := range serverURLs {
-			log.Printf("[DEBUG]   Upstream server %d: %s (priority=%d, mirror=%t, upload_head=%t)",
-				i+1, url, serverPriorities[i], capabilities[i].SupportsMirror, capabilities[i].SupportsUploadHead)
+			altAddr := cfg.UpstreamServers[i].AlternativeAddress
+			if altAddr != "" {
+				log.Printf("[DEBUG]   Upstream server %d: %s (connect via %s, priority=%d, mirror=%t, upload_head=%t)",
+					i+1, url, altAddr, serverPriorities[i], capabilities[i].SupportsMirror, capabilities[i].SupportsUploadHead)
+			} else {
+				log.Printf("[DEBUG]   Upstream server %d: %s (priority=%d, mirror=%t, upload_head=%t)",
+					i+1, url, serverPriorities[i], capabilities[i].SupportsMirror, capabilities[i].SupportsUploadHead)
+			}
 		}
 	}
 
