@@ -34,3 +34,9 @@ config/config.yaml
 /server
 config/.env
 .env
+
+# Local markdown files (not tracked in git)
+local/
+out
+debug_errors.log
+errors.log

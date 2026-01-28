@@ -589,6 +589,7 @@ The `scripts/` directory includes helper scripts (see `scripts/README.md` for de
 - `upload_file.sh` - Upload files with proper authentication
 - `mirror_hash.sh` - Mirror blobs using the mirror endpoint
 - `list_pubkey.sh` - List blobs for a pubkey with authentication
+- `list_missing_blobs.sh` - List blobs missing on each upstream server for a pubkey. Reads `upstream_servers` from config, lists blobs on each server, diffs against the union, then verifies each "missing" blob with HEAD (some servers list under a different pubkey or have incomplete lists). Usage: `./scripts/list_missing_blobs.sh <pubkey> [config_path] [-json]`. Requires `jq`, `curl`, `yq`; for auth, `nak` and `gen_auth_header.sh`.
 
 ## Development
 

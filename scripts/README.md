@@ -81,3 +81,31 @@ curl -X PUT -H "$HEADER" \
 6. Outputs `Authorization: Nostr <base64>` header
 
 The generated header can be used directly with `curl -H` or saved to a variable for reuse.
+
+## list_missing_blobs.sh
+
+Builds a per-server list of blobs that are missing (not found) for a given pubkey. Reads `upstream_servers` from the project config, lists blobs on each server, diffs against the union of all hashes, then verifies each "missing" blob with a HEAD request (removes from the list if HEAD returns 200, since some servers list under a different pubkey or have incomplete list responses).
+
+### Requirements
+
+- `jq` - JSON processor
+- `curl` - HTTP client
+- `yq` - YAML processor (https://github.com/mikefarah/yq)
+- For auth: `nak` and `gen_auth_header.sh` (set `NOSTR_SECRET_KEY`)
+
+### Usage
+
+```bash
+./scripts/list_missing_blobs.sh <pubkey> [config_path] [-json]
+```
+
+- **pubkey**: Hex (64 chars) or npub. Required, or set `BLOSSOM_PUBKEY`.
+- **config_path**: Default `config/config.yaml`.
+- **-json**: Output as `{"server_url": ["hash1", "hash2"], ...}`.
+
+### Examples
+
+```bash
+./scripts/list_missing_blobs.sh npub1xxx...
+./scripts/list_missing_blobs.sh $(nak encode npub < hexkey) config/config.yaml -json
+```

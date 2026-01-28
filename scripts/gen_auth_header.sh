@@ -72,15 +72,44 @@ KIND=24242
 # Build tags for Blossom upload event: ["t", "upload"], ["x", "hash"], ["expiration", "timestamp"]
 TAGS=("[\"t\",\"upload\"]")
 
-# Determine the hash - either from body file or from payload
+# Determine the hash - priority: BLOB_HASH env var > extract from JSON body URL > compute from file
+# BLOB_HASH is set by mirror_hash.sh to pass the hash extracted from the blob URL
+# For other scripts (upload_file.sh, etc.), hash is computed from the body file as before
 HASH=""
-if [ -n "$BODY_FILE" ] && [ -f "$BODY_FILE" ]; then
-    HASH=$(sha256sum "$BODY_FILE" | awk '{print $1}')
-    echo "[DEBUG] Computed hash from body file: $HASH" >&2
+if [ -n "${BLOB_HASH:-}" ]; then
+    # Hash explicitly passed via environment (only set by mirror_hash.sh)
+    # This takes precedence to ensure we use the hash from the URL, not the JSON file
+    HASH="$BLOB_HASH"
+    echo "[DEBUG] Using hash from BLOB_HASH environment variable: $HASH" >&2
+elif [ -n "$BODY_FILE" ] && [ -f "$BODY_FILE" ]; then
+    if echo "$URL" | grep -q "/mirror"; then
+        # For mirror requests with JSON body, try to extract hash from the JSON's URL field
+        # This allows other scripts calling gen_auth_header.sh with mirror JSON to work correctly
+        BODY_URL=$(jq -r '.url // empty' "$BODY_FILE" 2>/dev/null)
+        if [ -n "$BODY_URL" ]; then
+            # Extract hash from URL (last path component, remove extension)
+            HASH=$(echo "$BODY_URL" | sed 's|.*/||' | sed 's/\.[^.]*$//')
+            if echo "$HASH" | grep -qE '^[0-9a-fA-F]{64}$'; then
+                echo "[DEBUG] Extracted hash from JSON body URL field: $HASH" >&2
+            else
+                HASH=""
+            fi
+        fi
+        # Fallback: compute hash from JSON file if extraction failed
+        if [ -z "$HASH" ]; then
+            HASH=$(sha256sum "$BODY_FILE" | awk '{print $1}')
+            echo "[DEBUG] Computed hash from body file (fallback for mirror): $HASH" >&2
+        fi
+    else
+        # For non-mirror requests (e.g. /upload), always compute hash from body file
+        # This preserves backward compatibility for upload_file.sh and other scripts
+        HASH=$(sha256sum "$BODY_FILE" | awk '{print $1}')
+        echo "[DEBUG] Computed hash from body file: $HASH" >&2
+    fi
 elif echo "$URL" | grep -q "/mirror"; then
-    # For mirror requests without body file, try to extract hash from request if possible
-    # Otherwise, we'll compute it from the JSON body
-    echo "[DEBUG] Mirror request - hash will be in request body" >&2
+    # For mirror requests without body file, hash will be in request body
+    # This case is unlikely but preserved for backward compatibility
+    echo "[DEBUG] Mirror request without body file - hash will be in request body" >&2
 fi
 
 # If we have a hash, add it as ["x", "hash"] tag
