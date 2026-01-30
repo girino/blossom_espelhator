@@ -4,11 +4,12 @@
 # Always uses Blossom upload event format (kind 24242)
 #
 # Usage:
-#   ./scripts/gen_auth_header.sh METHOD URL [BODY_FILE] [FILE_NAME]
+#   ./scripts/gen_auth_header.sh [-h|--hash <hash>] METHOD URL [BODY_FILE] [FILE_NAME]
 #
 # Examples:
 #   ./scripts/gen_auth_header.sh PUT http://localhost:8080/upload /path/to/file.pdf "bitcoin.pdf"
 #   ./scripts/gen_auth_header.sh PUT http://localhost:8080/mirror mirror.json
+#   ./scripts/gen_auth_header.sh --hash abc123... PUT http://localhost:8080/mirror mirror.json
 #   ./scripts/gen_auth_header.sh HEAD http://localhost:8080/upload
 #
 # Environment:
@@ -17,17 +18,47 @@
 
 set -euo pipefail
 
+BLOB_HASH=""
+
+# Parse optional flags
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        -h|--hash)
+            if [ -z "${2:-}" ]; then
+                echo "Error: -h/--hash requires a hash value" >&2
+                echo "Usage: $0 [-h|--hash <hash>] METHOD URL [BODY_FILE] [FILE_NAME]" >&2
+                exit 1
+            fi
+            BLOB_HASH="$2"
+            shift 2
+            ;;
+        --)
+            shift
+            break
+            ;;
+        -*)
+            echo "Error: Unknown option: $1" >&2
+            echo "Usage: $0 [-h|--hash <hash>] METHOD URL [BODY_FILE] [FILE_NAME]" >&2
+            exit 1
+            ;;
+        *)
+            break
+            ;;
+    esac
+done
+
 METHOD="${1:-}"
 URL="${2:-}"
 BODY_FILE="${3:-}"
 FILE_NAME="${4:-}"
 
 if [ -z "$METHOD" ] || [ -z "$URL" ]; then
-    echo "Usage: $0 METHOD URL [BODY_FILE]"
+    echo "Usage: $0 [-h|--hash <hash>] METHOD URL [BODY_FILE] [FILE_NAME]"
     echo ""
     echo "Examples:"
     echo "  $0 HEAD http://localhost:8080/upload"
     echo "  $0 PUT http://localhost:8080/upload body.json"
+    echo "  $0 --hash abc123... PUT http://localhost:8080/mirror mirror.json"
     echo ""
     echo "Set NOSTR_SECRET_KEY environment variable with your private key"
     exit 1
@@ -69,18 +100,38 @@ CREATED_AT=$(date +%s)
 echo "[DEBUG] Using Blossom upload event format (kind 24242)" >&2
 KIND=24242
 
-# Build tags for Blossom upload event: ["t", "upload"], ["x", "hash"], ["expiration", "timestamp"]
-TAGS=("[\"t\",\"upload\"]")
+# Action tag "t" must match the endpoint per BUD-01: list -> "list", upload/mirror -> "upload", delete -> "delete"
+if echo "$URL" | grep -qE '/list[/?]|/list$'; then
+    ACTION_TAG="list"
+elif echo "$URL" | grep -qE '/mirror[/?]|/mirror$'; then
+    ACTION_TAG="upload"
+elif echo "$URL" | grep -qE '/upload[/?]|/upload$'; then
+    ACTION_TAG="upload"
+elif echo "$URL" | grep -qE '/delete[/?]|/delete$'; then
+    ACTION_TAG="delete"
+else
+    # Default to upload for unknown paths (e.g. GET /list is the main one that needs "list")
+    ACTION_TAG="upload"
+fi
+echo "[DEBUG] Action tag for URL: [\"t\",\"$ACTION_TAG\"]" >&2
 
-# Determine the hash - priority: BLOB_HASH env var > extract from JSON body URL > compute from file
-# BLOB_HASH is set by mirror_hash.sh to pass the hash extracted from the blob URL
+# Build tags for Blossom event: ["t", "<action>"], ["x", "hash"], ["expiration", "timestamp"]
+TAGS=("[\"t\",\"$ACTION_TAG\"]")
+
+# Determine the hash - priority: -h/--hash parameter > extract from JSON body URL > compute from file
+# Hash parameter is passed by mirror_hash.sh to use the hash from the blob URL, not the JSON file
 # For other scripts (upload_file.sh, etc.), hash is computed from the body file as before
 HASH=""
-if [ -n "${BLOB_HASH:-}" ]; then
-    # Hash explicitly passed via environment (only set by mirror_hash.sh)
-    # This takes precedence to ensure we use the hash from the URL, not the JSON file
+if [ -n "$BLOB_HASH" ]; then
+    # Hash explicitly passed via command-line parameter (e.g. from mirror_hash.sh)
+    # Validate hash format
+    if ! echo "$BLOB_HASH" | grep -qE '^[0-9a-fA-F]{64}$'; then
+        echo "Error: Invalid hash format: $BLOB_HASH" >&2
+        echo "Hash must be 64 hexadecimal characters." >&2
+        exit 1
+    fi
     HASH="$BLOB_HASH"
-    echo "[DEBUG] Using hash from BLOB_HASH environment variable: $HASH" >&2
+    echo "[DEBUG] Using hash from command-line parameter: $HASH" >&2
 elif [ -n "$BODY_FILE" ] && [ -f "$BODY_FILE" ]; then
     if echo "$URL" | grep -q "/mirror"; then
         # For mirror requests with JSON body, try to extract hash from the JSON's URL field

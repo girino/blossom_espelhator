@@ -40,3 +40,4 @@ local/
 out
 debug_errors.log
 errors.log
+config/keys

@@ -190,14 +190,14 @@ while IFS= read -r line; do
         failed=$((failed + 1))
         continue
     fi
-    mirror_cmd="cd \"$REPO_ROOT\" && ./scripts/mirror_hash.sh \"$url\" \"$SERVER_URL\""
+    mirror_cmd="cd \"$REPO_ROOT\" && ./scripts/mirror_hash.sh --hash \"$hash\" \"$url\" \"$SERVER_URL\""
     verb "Line $i: mirror url=$url (hash=$hash)"
     verb "  Running: $mirror_cmd"
     if [[ -n "${DRY_RUN:-}" ]]; then
         echo "$mirror_cmd" >&2
         continue
     fi
-    mirror_out=$(cd "$REPO_ROOT" && ./scripts/mirror_hash.sh "$url" "$SERVER_URL" 2>&1)
+    mirror_out=$(cd "$REPO_ROOT" && ./scripts/mirror_hash.sh --hash "$hash" "$url" "$SERVER_URL" 2>&1)
     mirror_ec=$?
     if [[ $mirror_ec -ne 0 ]]; then
         verb "  mirror failed exit_code=$mirror_ec"

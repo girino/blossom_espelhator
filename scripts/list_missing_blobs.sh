@@ -3,6 +3,7 @@
 # List blobs that are missing on each upstream server for a given pubkey.
 # Reads upstream_servers from config, lists blobs on each, diffs against the union,
 # then verifies each "missing" blob with HEAD (removes from list if HEAD 200).
+# Servers with supports_mirror: false are source-only: we call list (for union/source) but skip missing/HEAD and do not output a section for them.
 #
 # Usage: ./scripts/list_missing_blobs.sh <pubkey> [config_path] [-json] [-v] [-o dir]
 #
@@ -127,9 +128,10 @@ fi
 
 verb "config $CONFIG_PATH pubkey ${HEX_PUBKEY:0:8}..."
 
-# Parse upstream servers: output "base_url connect_url priority" per line (connect = alternative_address or base; priority = .priority, default 999)
+# Parse upstream servers: output "base_url connect_url priority supports_mirror" per line
+# supports_mirror: true = destination (we compute missing + HEAD check); false = source-only (list only, no missing/HEAD)
 yq_out=$(yq -r '
-  .upstream_servers[] | [.url, (if .alternative_address then .alternative_address else .url end), (.priority // 999)] | @tsv
+  .upstream_servers[] | [.url, (if .alternative_address then .alternative_address else .url end), (.priority // 999), (if .supports_mirror == false then "0" else "1" end)] | @tsv
 ' "$CONFIG_PATH" 2>/dev/null) || die "failed to parse config with yq"
 LINES=()
 while IFS= read -r line; do
@@ -193,19 +195,23 @@ head_ok() {
     [[ "$code" = "200" ]]
 }
 
-# Build list of "base_url connect_url" and priority per index (normalize spaces; priority default 999)
+# Build list of "base_url connect_url", priority, and supports_mirror per index
 SERVERS=()
 PRIORITIES=()
+SUPPORTS_MIRROR=()
 for line in "${LINES[@]}"; do
     [[ -z "$line" ]] && continue
     base="${line%%$'\t'*}"
     rest="${line#*$'\t'}"
     connect="${rest%%$'\t'*}"
-    prio="${rest#*$'\t'}"
+    rest2="${rest#*$'\t'}"
+    prio="${rest2%%$'\t'*}"
+    supports_mirror="${rest2#*$'\t'}"
     base="${base//\"/}"
     connect="${connect//\"/}"
     SERVERS+=("$base $connect")
     PRIORITIES+=("${prio:-999}")
+    SUPPORTS_MIRROR+=("${supports_mirror:-1}")
 done
 verb "parsed ${#SERVERS[@]} upstream servers"
 
@@ -252,11 +258,16 @@ done
 sort -u "$TMP/union.txt" > "$TMP/union_sorted.txt"
 verb "union: $(wc -l < "$TMP/union_sorted.txt") unique hashes"
 
-# 2) For each server: missing = union - server_hashes; then filter by HEAD
-declare -a MISSING_LISTS
+# 2) For each server with supports_mirror: missing = union - server_hashes; then filter by HEAD
+#    Source-only servers (supports_mirror=false): skip missing/HEAD, they can still be a source
+declare -A MISSING_LISTS
 nservers=${#SERVERS[@]}
 for i in "${!SERVERS[@]}"; do
     read -r base connect <<< "${SERVERS[$i]}"
+    if [[ "${SUPPORTS_MIRROR[$i]:-1}" = "0" ]]; then
+        verb "skip missing check for $base (source-only, list used for union/source only)"
+        continue
+    fi
     # missing_candidates = union - server_i
     comm -23 "$TMP/union_sorted.txt" <(sort -u "$TMP/server_$i.txt") > "$TMP/missing_cand_$i.txt" || true
     ncand=$(wc -l < "$TMP/missing_cand_$i.txt")
@@ -292,13 +303,14 @@ for i in "${!SERVERS[@]}"; do
     fi
     nfinal=$(wc -l < "$TMP/missing_final_$i.txt")
     verb "$base missing_after_head: $nfinal"
-    MISSING_LISTS+=("$TMP/missing_final_$i.txt")
+    MISSING_LISTS[$i]="$TMP/missing_final_$i.txt"
 done
 
 # 3) Output: with -o only write to files; otherwise print to stdout (json or human-readable)
-#    Columns: hash, source_url (exact .url from list), inferred_url (server_base/hash.ext, blossom standard).
+#    Only for destination servers (supports_mirror=true). Columns: hash, source_url, inferred_url.
 if [[ -n "$OUT_DIR" ]]; then
     for i in "${!SERVERS[@]}"; do
+        [[ -z "${MISSING_LISTS[$i]:-}" ]] && continue
         read -r base connect <<< "${SERVERS[$i]}"
         fname=$(safe_output_name "$base")
         : > "$OUT_DIR/$fname"
@@ -311,7 +323,11 @@ if [[ -n "$OUT_DIR" ]]; then
     done
 elif [[ -n "$JSON_OUT" ]]; then
     echo -n '{'
+    first=1
     for i in "${!SERVERS[@]}"; do
+        [[ -z "${MISSING_LISTS[$i]:-}" ]] && continue
+        [[ $first -eq 0 ]] && echo -n ','
+        first=0
         read -r base connect <<< "${SERVERS[$i]}"
         json_elems=""
         while read -r h; do
@@ -322,12 +338,12 @@ elif [[ -n "$JSON_OUT" ]]; then
             json_elems+=$(jq -n -c --arg h "$h" --arg s "$src" --arg i "$inferred" '{hash:$h,source:$s,inferred:$i}')
         done < "${MISSING_LISTS[$i]}"
         hashes="[${json_elems}]"
-        [[ $i -gt 0 ]] && echo -n ','
         printf '"%s": %s' "$base" "$hashes"
     done
     echo '}'
 else
     for i in "${!SERVERS[@]}"; do
+        [[ -z "${MISSING_LISTS[$i]:-}" ]] && continue
         read -r base connect <<< "${SERVERS[$i]}"
         echo "## $base"
         if [[ ! -s "${MISSING_LISTS[$i]}" ]]; then

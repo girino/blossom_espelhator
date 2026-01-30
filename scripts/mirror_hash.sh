@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 # One-liner helper: Mirror a blob using curl with proper auth
-# Usage: ./scripts/mirror_hash.sh [-v|--verbose] <url> [server_url]
+# Usage: ./scripts/mirror_hash.sh [-v|--verbose] [-h|--hash <hash>] <url> [server_url]
 # Example: ./scripts/mirror_hash.sh https://server.com/a49944fa9c909d7c2a2ac50bbdb9e3d39ba08347d611dbabc0ba426f33b2d9da
 # Example: ./scripts/mirror_hash.sh -v https://server.com/a49944fa9c909d7c2a2ac50bbdb9e3d39ba08347d611dbabc0ba426f33b2d9da http://localhost:7624
+# Example: ./scripts/mirror_hash.sh --hash abc123... https://ipfs.girino.org/ipfs/Qm... http://localhost:7624
 
 VERBOSE=""
+BLOB_HASH=""
 
 verb() {
     [ -n "$VERBOSE" ] && echo "[DEBUG] $*" >&2
@@ -17,13 +19,22 @@ while [ "$#" -gt 0 ]; do
             VERBOSE=1
             shift
             ;;
+        -h|--hash)
+            if [ -z "${2:-}" ]; then
+                echo "Error: -h/--hash requires a hash value" >&2
+                echo "Usage: $0 [-v|--verbose] [-h|--hash <hash>] <url> [server_url]" >&2
+                exit 1
+            fi
+            BLOB_HASH="$2"
+            shift 2
+            ;;
         --)
             shift
             break
             ;;
         -*)
             echo "Error: Unknown option: $1" >&2
-            echo "Usage: $0 [-v|--verbose] <url> [server_url]" >&2
+            echo "Usage: $0 [-v|--verbose] [-h|--hash <hash>] <url> [server_url]" >&2
             exit 1
             ;;
         *)
@@ -39,9 +50,10 @@ SERVER_URL="${2:-http://localhost:7624}"
 #SERVER_URL="${SERVER_URL%/}"
 
 if [ -z "$URL" ]; then
-    echo "Usage: $0 [-v|--verbose] <url> [server_url]" >&2
+    echo "Usage: $0 [-v|--verbose] [-h|--hash <hash>] <url> [server_url]" >&2
     echo "Example: $0 https://server.com/a49944fa9c909d7c2a2ac50bbdb9e3d39ba08347d611dbabc0ba426f33b2d9da" >&2
     echo "Example: $0 https://server.com/a49944fa9c909d7c2a2ac50bbdb9e3d39ba08347d611dbabc0ba426f33b2d9da http://localhost:7624" >&2
+    echo "Example: $0 -h abc123... https://ipfs.girino.org/ipfs/Qm... http://localhost:7624" >&2
     exit 1
 fi
 
@@ -68,14 +80,26 @@ trap "rm -f \"$TMPFILE\"" EXIT
 
 # Extract hash from URL (last path component, remove extension if present)
 # URL format: https://server.com/hash or https://server.com/hash.ext
-BLOB_HASH=$(echo "$URL" | sed 's|.*/||' | sed 's/\.[^.]*$//')
-# Validate it looks like a hash (64 hex chars)
-if ! echo "$BLOB_HASH" | grep -qE '^[0-9a-fA-F]{64}$'; then
-    echo "Error: Could not extract valid hash from URL: $URL" >&2
-    echo "Expected format: https://server.com/<64-hex-char-hash> or https://server.com/<hash>.<ext>" >&2
-    exit 1
+# If hash was provided via -h/--hash parameter, use that instead
+if [ -z "$BLOB_HASH" ]; then
+    BLOB_HASH=$(echo "$URL" | sed 's|.*/||' | sed 's/\?.*$//' | sed 's/\.[^.]*$//')
+    # Validate it looks like a hash (64 hex chars)
+    if ! echo "$BLOB_HASH" | grep -qE '^[0-9a-fA-F]{64}$'; then
+        echo "Error: Could not extract valid hash from URL: $URL" >&2
+        echo "Expected format: https://server.com/<64-hex-char-hash> or https://server.com/<hash>.<ext>" >&2
+        echo "Or use -h/--hash <hash> to specify the hash explicitly." >&2
+        exit 1
+    fi
+    verb "Extracted hash from URL: $BLOB_HASH"
+else
+    # Validate provided hash
+    if ! echo "$BLOB_HASH" | grep -qE '^[0-9a-fA-F]{64}$'; then
+        echo "Error: Invalid hash format: $BLOB_HASH" >&2
+        echo "Hash must be 64 hexadecimal characters." >&2
+        exit 1
+    fi
+    verb "Using hash from command-line parameter: $BLOB_HASH"
 fi
-verb "Extracted hash from URL: $BLOB_HASH"
 
 echo "{\"url\":\"$URL\"}" > "$TMPFILE"
 if [ $? -ne 0 ]; then
@@ -85,12 +109,10 @@ fi
 
 # Generate auth header
 # gen_auth_header.sh outputs debug to stderr and the header to stdout
-# Pass hash via environment variable so gen_auth_header can use it (extracted from URL, not JSON file)
-verb "Generating auth header with gen_auth_header.sh PUT $SERVER_URL/mirror $TMPFILE (hash=$BLOB_HASH)"
-export BLOB_HASH
-HEADER=$(./scripts/gen_auth_header.sh PUT "$SERVER_URL/mirror" "$TMPFILE" 2>/dev/null)
+# Pass hash via command-line parameter so gen_auth_header can use it (from parameter or extracted from URL, not JSON file)
+verb "Generating auth header with gen_auth_header.sh --hash $BLOB_HASH PUT $SERVER_URL/mirror $TMPFILE"
+HEADER=$(./scripts/gen_auth_header.sh --hash "$BLOB_HASH" PUT "$SERVER_URL/mirror" "$TMPFILE" 2>/dev/null)
 GEN_HEADER_EXIT=$?
-unset BLOB_HASH
 
 if [ $GEN_HEADER_EXIT -ne 0 ] || [ -z "$HEADER" ]; then
     echo "Error: Failed to generate authentication header." >&2
