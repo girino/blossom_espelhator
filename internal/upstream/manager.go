@@ -9,6 +9,7 @@ import (
 	"log"
 	"math/rand"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -1031,7 +1032,9 @@ func (m *Manager) CheckPathOnServers(ctx context.Context, path string, timeout t
 
 			// Use Head() to get headers, passing the full path (may include extension)
 			headResp, err := c.Head(checkCtx, path)
-			hasBlob := err == nil && headResp != nil && headResp.StatusCode == http.StatusOK
+			// Some servers (e.g. nostrcheck.me) return 200 with X-Reason: File not found instead of 404
+			hasBlob := err == nil && headResp != nil && headResp.StatusCode == http.StatusOK &&
+				!strings.EqualFold(strings.TrimSpace(headResp.Header.Get("X-Reason")), "File not found")
 
 			var headers http.Header
 			if hasBlob && headResp != nil {
