@@ -44,23 +44,25 @@ func New(baseURL string, connectURL string, timeout time.Duration, verbose bool)
 }
 
 // getConnectURL returns the URL to use for making HTTP connections
-// It replaces the hostname in baseURL with the hostname from connectURL
+// It replaces the hostname in baseURL with the hostname from connectURL.
+// Trims trailing slashes from the base and ensures path has one leading slash to avoid duplication.
 func (c *Client) getConnectURL(path string) (string, error) {
-	// If connectURL is the same as baseURL, just use baseURL
+	path = "/" + strings.TrimLeft(path, "/")
 	if c.connectURL == c.baseURL {
-		return fmt.Sprintf("%s%s", c.baseURL, path), nil
+		base := strings.TrimRight(c.baseURL, "/")
+		return base + path, nil
 	}
-	
+
 	// Parse the connect URL
 	connectParsed, err := url.Parse(c.connectURL)
 	if err != nil {
 		return "", fmt.Errorf("failed to parse connectURL: %w", err)
 	}
-	
+
 	// Build the connection URL using the connectURL's scheme and host, with the provided path
-	// The path parameter already includes the full path (e.g., "/upload" or "/hash")
-	connectURL := fmt.Sprintf("%s://%s%s", connectParsed.Scheme, connectParsed.Host, path)
-	
+	base := strings.TrimRight(connectParsed.Host, "/")
+	connectURL := fmt.Sprintf("%s://%s%s", connectParsed.Scheme, base, path)
+
 	return connectURL, nil
 }
 
