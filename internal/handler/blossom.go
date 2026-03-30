@@ -415,18 +415,7 @@ func (h *BlossomHandler) HandleUpload(w http.ResponseWriter, r *http.Request) {
 		log.Printf("[DEBUG] HandleUpload: upload successful to %d servers", len(successfulServers))
 	}
 
-	// Extract server URLs for cache
-	serverURLs := make([]string, 0, len(successfulServers))
-	for _, srv := range successfulServers {
-		serverURLs = append(serverURLs, srv.ServerURL)
-	}
-
-	// Update cache with successful servers
-	h.cache.Add(hashStr, serverURLs)
-
-	if h.verbose {
-		log.Printf("[DEBUG] HandleUpload: added hash %s to cache with %d servers", hashStr, len(serverURLs))
-	}
+	// Do not cache successful upload targets for GET/HEAD: some upstreams accept PUT before the blob is readable.
 
 	// Select a server to return in the response
 	selectedServer, err := h.upstreamManager.SelectServer(successfulServers)
